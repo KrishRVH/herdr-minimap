@@ -114,5 +114,75 @@ class Agents(unittest.TestCase):
                 os.environ["HOME"] = old
 
 
+SNAP = {"focused_workspace_id": "w1", "focused_pane_id": "w1:p1", "focused_tab_id": "w1:t1",
+        "workspaces": [{"workspace_id": "w1", "number": 1, "label": "first mate", "agent_status": "working"},
+                       {"workspace_id": "w2", "number": 2, "label": "└ ci-tidy · p:6uAob5", "agent_status": "done"},
+                       {"workspace_id": "w3", "number": 3, "label": "⚓ captain's deck", "agent_status": "unknown"},
+                       {"workspace_id": "w4", "number": 4, "label": "notes", "agent_status": "idle"}],
+        "agents": [{"pane_id": "w1:p1", "display_agent": "👒 Luffy", "agent_status": "working", "workspace_id": "w1",
+                    "terminal_title_stripped": "CI rework"},
+                   {"pane_id": "w2:p2", "display_agent": "🌸 Robin", "agent_status": "blocked", "workspace_id": "w2"}],
+        "layouts": [{"tab_id": "w1:t1", "workspace_id": "w1", "zoomed": False, "area": {"width": 200},
+                     "panes": [{"pane_id": "w1:p1", "rect": {"x": 0, "y": 0, "width": 120, "height": 60}},
+                               {"pane_id": "w1:p3", "rect": {"x": 120, "y": 0, "width": 80, "height": 20}},
+                               {"pane_id": "w1:p4", "rect": {"x": 120, "y": 20, "width": 80, "height": 40}}]},
+                    {"tab_id": "w2:t1", "workspace_id": "w2", "zoomed": False, "panes": []},
+                    {"tab_id": "w3:t1", "workspace_id": "w3", "zoomed": False, "panes": []},
+                    {"tab_id": "w4:t1", "workspace_id": "w4", "zoomed": True, "panes": []}]}
+
+
+class Nav(unittest.TestCase):
+    def data(self):
+        crew = [dict(crewmate("ci-tidy"), space="w2", pane="w2:p2")]
+        data = {"root": "👒 Luffy", "root_pane": "w1:p1", "root_state": "working", "crew": crew}
+        data.update(mm.places(SNAP, crew))
+        return data
+
+    def test_spaces_name_the_crewmate_and_mark_crew_and_deck_spaces(self):
+        spaces = self.data()["spaces"]
+        self.assertEqual([s["label"] for s in spaces], ["first mate", "🌸 Robin · ci-tidy", "⚓ captain's deck", "notes"])
+        self.assertEqual([(s["crew"], s["deck"], s["here"]) for s in spaces],
+                         [(False, False, True), (True, False, False), (False, True, False), (False, False, False)])
+        self.assertEqual(mm.space_label({"label": "└ grt · p:xyz", "number": 5}, []), "grt")
+
+    def test_agents_carry_herdr_state_and_their_space_number(self):
+        agents = self.data()["agents"]
+        self.assertEqual([(a["name"], a["state"], a["n"]) for a in agents],
+                         [("👒 Luffy", "working", 1), ("🌸 Robin", "decision", 2)])
+
+    def test_every_listed_place_is_pickable_and_clickable(self):
+        hits = []
+        lines, items = mm.nav_lines(self.data(), 60, cursor=1, hits=hits)
+        self.assertEqual(items, [("space", "w1"), ("space", "w2"), ("space", "w3"), ("space", "w4"),
+                                 ("agent", "w1:p1"), ("agent", "w2:p2")])
+        for place in items:
+            line = next(l for l, _, _, p in hits if p == place)
+            self.assertTrue(lines[line].strip(), place)
+        self.assertIn("▸", lines[2], "the cursor marks the second space")
+        chart = next(i for i, l in enumerate(lines) if "fleet" in l)
+        robin = [l for l, _, _, p in hits if p == ("agent", "w2:p2") and l > chart]
+        self.assertTrue(any("Robin" in lines[l] for l in robin), "a crewmate's column in the chart is clickable too")
+        self.assertEqual(mm.hit_at(hits, 5, next(l for l, _, _, p in hits if p == ("space", "w3"))), ("space", "w3"))
+        self.assertIsNone(mm.hit_at(hits, 5, 0), "the section rule is not a place")
+
+    def test_the_column_stays_out_of_crew_and_deck_spaces_and_zoomed_tabs(self):
+        data = self.data()
+        self.assertTrue(mm.hostable(SNAP, data, "w1:t1")[0])
+        for tab in ("w2:t1", "w3:t1", "w4:t1", "nope"):
+            self.assertFalse(mm.hostable(SNAP, data, tab)[0], tab)
+
+    def test_the_column_splits_off_the_tallest_pane_on_the_right_edge(self):
+        layout = SNAP["layouts"][0]
+        self.assertEqual(mm.right_edge(layout)["pane_id"], "w1:p4")
+        self.assertAlmostEqual(mm.ratio_for(200), 1 - mm.WIDTH / 200)
+        self.assertEqual(mm.ratio_for(80), 0.5, "a narrow pane keeps at least half")
+
+    def test_keys_clicks_and_the_wheel(self):
+        self.assertEqual(mm.keys_of(b"\x1b[A\x1b[Bj\r\x1b"), [("up",), ("down",), ("char", "j"), ("enter",), ("esc",)])
+        self.assertEqual(mm.keys_of(b"\x1b[<0;12;4M\x1b[<0;12;4m"), [("click", 11, 3)])
+        self.assertEqual(mm.keys_of(b"\x1b[<64;1;1M\x1b[<65;1;1M"), [("wheel", -1), ("wheel", 1)])
+        self.assertEqual(mm.keys_of(b"\x1b[I2"), [("char", "2")], "a focus report is skipped")
+
+
 if __name__ == "__main__":
     unittest.main()

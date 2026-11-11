@@ -1,21 +1,50 @@
-# The fleet minimap: the first mate, its crew and each crewmate's agents, fanned out at the right of the first
-# mate's tab. `qd setup` links this folder (herdr plugin link); tools/herdr.toml binds prefix+m to the toggle and
+# The fleet minimap, the nav column that stands in for herdr's sidebar (tools/herdr.toml hides it): every space and
+# agent to jump to, then the first mate, its crew and their agents fanned out like a chart. `qd setup` links this
+# folder (herdr plugin link); tools/herdr.toml binds prefix+m (nav) and prefix+d (Captain's Deck in its own space) and
 # puts the one-line version in the tab bar.
 id = "qd.minimap"
 name = "Fleet minimap"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.5"
-description = "The first mate, its crew and their agents, fanned out like a chart"
+description = "The nav column: spaces, agents, and the first mate's crew fanned out like a chart"
 platforms = ["macos", "linux"]
+
+# open the nav column once herdr has restored its spaces, since the sidebar starts hidden
+[[startup]]
+command = ["/usr/bin/env", "python3", "minimap.py", "--ensure"]
 
 [[actions]]
 id = "toggle"
-title = "Toggle the fleet minimap"
+title = "Focus the nav, or step back out of it"
 contexts = ["workspace"]
 command = ["/usr/bin/env", "python3", "minimap.py", "--toggle"]
 
+[[actions]]
+id = "deck"
+title = "Captain's Deck in its own space"
+contexts = ["workspace"]
+command = ["/usr/bin/env", "python3", "minimap.py", "--deck"]
+
 [[panes]]
 id = "map"
-title = "⛵ fleet"
+title = "⛵ nav"
 placement = "split"
 command = ["/usr/bin/env", "python3", "minimap.py"]
+
+# the same nav over a crew space or the deck, where the column does not go
+[[panes]]
+id = "pick"
+title = "⛵ nav"
+placement = "popup"
+width = 60
+height = "85%"
+command = ["/usr/bin/env", "python3", "minimap.py", "--popup"]
+
+# closing a space or tab closes the nav column with it when it was there: open it again in the first mate's tab
+[[events]]
+on = "workspace.closed"
+command = ["/usr/bin/env", "python3", "minimap.py", "--ensure"]
+
+[[events]]
+on = "tab.closed"
+command = ["/usr/bin/env", "python3", "minimap.py", "--ensure"]

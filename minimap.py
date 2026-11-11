@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""The fleet minimap: the first mate, its crew, and each crewmate's own agents, fanned out like a chart.
+"""The fleet minimap, the nav column that stands in for herdr's sidebar: every space and agent to jump to, then
+the first mate, its crew and each crewmate's own agents, fanned out like a chart.
 
-  minimap.py            draw it in this terminal and keep it live (the plugin pane; q closes it)
+  minimap.py            the nav column (plugin pane "map"): follows focus across the captain's own spaces
+  minimap.py --popup    the same nav as a popup (plugin pane "pick"); exits once a choice is made
   minimap.py --once     print one frame and exit
   minimap.py --line     one plain line for herdr's tab bar (tools/herdr.toml, ui.tab_bar_right)
-  minimap.py --toggle   open the pane at the right of the first mate's tab, or close it (prefix+m)
+  minimap.py --toggle   prefix+m: focus the nav here, or step back out of it; in a crew space, the popup
+  minimap.py --deck     prefix+d: Captain's Deck in a space of its own, opened the first time
+  minimap.py --ensure   the plugin's startup hook: open the nav column when none is open
 
-Read-only: herdr's live snapshot names each pane and its agent state, firstmate's state/<id>.meta ties a pane to
-its task and state/<id>.status says whether it waits on the captain, and Claude's subagent transcripts
-(~/.claude*/projects/*/<session>/subagents) show the agents a crewmate has fanned out. Python 3.9, standard library.
+In the nav: up/down or the wheel picks, enter or a click goes, 1-9 jumps to that space, d opens the deck, f goes to
+the first mate, esc or q steps back. The column never enters a crew space (firstmate expects one pane there) or the
+deck's. It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and Claude's subagent transcripts
+(~/.claude*/projects/*/<session>/subagents); it changes only focus and its own pane. Python 3.9, standard library.
 """
 import glob
 import json
@@ -16,6 +21,7 @@ import os
 import re
 import select
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -27,13 +33,16 @@ PLUGIN = "qd.minimap"
 ACTIVE_SECONDS = 90      # a subagent transcript written this recently is still at work
 RECENT_SECONDS = 600     # one finished this recently still shows, dimmed
 RECENT_SHOWN = 2         # at most this many finished agents per crewmate
-WIDTH = 90               # the column's width in cells when --toggle opens it
-MAP_ROWS = 26            # the map's height when Captain's Deck sits under it
-DECK = "herdr-firstmate-flow"  # Captain's Deck (deimantasnork/captains-deck), opened under the map when installed
+WIDTH = 56               # the nav column's width in cells
+NAV_TITLE = "⛵ nav"      # the map pane's title in herdr-plugin.toml, which is how a live nav is found
+DECK = "herdr-firstmate-flow"  # Captain's Deck (deimantasnork/captains-deck)
+DECK_SPACE = "⚓ captain's deck"  # the deck's own space
+POLL = 0.5               # seconds between looks at herdr's focus
+FOLLOW_AFTER = 0.4       # focus rests on another space this long before the column follows it
 
 # tools/herdr.toml's night colors
-GOLD, TEXT, DIM, GREEN, RED, BLUE, YELLOW, MAUVE, TEAL = (
-    "e5b850", "ece4d2", "7d7a73", "86c99a", "ef6a5a", "8fb8e0", "e0b25c", "b99bd0", "6fb3b0")
+GOLD, TEXT, DIM, GREEN, RED, BLUE, YELLOW, MAUVE, TEAL, SUBTEXT = (
+    "e5b850", "ece4d2", "7d7a73", "86c99a", "ef6a5a", "8fb8e0", "e0b25c", "b99bd0", "6fb3b0", "b2aa98")
 SPIN = "◐◓◑◒"
 SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
@@ -46,8 +55,36 @@ def herdr(*args, timeout=5):
         return {}
 
 
-def panes():
-    snap = herdr("api", "snapshot").get("snapshot") or {}
+def api(method, **params):
+    """One request over herdr's socket (newline-delimited JSON), for calls its CLI lacks; {} on any failure."""
+    path = os.environ.get("HERDR_SOCKET_PATH") or os.path.expanduser("~/.config/herdr/herdr.sock")
+    try:
+        with socket.socket(socket.AF_UNIX) as conn:
+            conn.settimeout(5)
+            conn.connect(path)
+            conn.sendall((json.dumps({"id": f"qd.minimap:{method}", "method": method, "params": params}) + "\n")
+                         .encode())
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = conn.recv(1 << 20)
+                if not chunk:
+                    break
+                buf += chunk
+        return json.loads(buf).get("result") or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def snapshot():
+    return (api("session.snapshot") or herdr("api", "snapshot")).get("snapshot") or {}
+
+
+def focus_pane(pane):
+    return bool(api("pane.focus", pane_id=pane))
+
+
+def panes(snap=None):
+    snap = snapshot() if snap is None else snap
     return {p["pane_id"]: p for p in snap.get("panes", []) if p.get("pane_id")}
 
 
@@ -120,10 +157,12 @@ def split_label(label, fallback):
     return (name, rest) if sep else (label or fallback, "")
 
 
-def fleet(now=None):
-    """The root and its crew as plain data, so the drawing is testable without herdr."""
+def fleet(snap=None, now=None):
+    """The root and its crew, then the spaces and agents to jump to, as plain data, so the drawing is testable
+    without herdr."""
     now = now or time.time()
-    live = panes()
+    snap = snapshot() if snap is None else snap
+    live = panes(snap)
     root = next((p for p in live.values() if "first mate" in (p.get("label") or "")), None) or next(
         (p for p in live.values() if (p.get("cwd") or "").rstrip("/").endswith("/firstmate")), None)
     crew = []
@@ -137,15 +176,50 @@ def fleet(now=None):
         session = ((pane or {}).get("agent_session") or {}).get("value")
         spawned = re.match(r"s(\d+)", m.get("spawn_gen") or "")
         log = events(task)
-        crew.append({"task": task, "name": name, "kind": m.get("kind") or "ship",
+        crew.append({"task": task, "name": name, "kind": m.get("kind") or "ship", "pane": (pane or {}).get("pane_id"),
+                     "space": m.get("herdr_workspace_id") or (pane or {}).get("workspace_id"),
                      "state": state_of(pane, task_wait(task)), "agents": subagents(session, now),
                      "project": os.path.basename(m.get("project") or ""), "model": m.get("model") or "",
                      "effort": m.get("effort") or "", "age": now - int(spawned[1]) if spawned else None,
                      "prs": list(dict.fromkeys(pr for _, _, text in reversed(log)
                                                for pr in re.findall(r"#\d+", text)))[:2],
                      "events": log[-3:]})
-    return {"root": split_label(root and root.get("label"), "👒 first mate")[0],
-            "root_state": state_of(root, ""), "crew": crew}
+    data = {"root": split_label(root and root.get("label"), "👒 first mate")[0],
+            "root_pane": (root or {}).get("pane_id"), "root_state": state_of(root, ""), "crew": crew}
+    data.update(places(snap, crew))
+    return data
+
+
+HERDR_STATE = {"working": "working", "blocked": "decision", "done": "done"}
+
+
+def crew_space(ws, crew):
+    """A space firstmate made for a crewmate: the nav column stays out of it."""
+    return (ws.get("label") or "").startswith("└") or any(c.get("space") == ws.get("workspace_id") for c in crew)
+
+
+def space_label(ws, crew):
+    """A space's name: the crewmate's own for a crew space, else herdr's label without firstmate's group suffix."""
+    c = next((c for c in crew if c.get("space") and c["space"] == ws.get("workspace_id")), None)
+    if c:
+        return f"{c['name']} · {c['task']}"
+    label = re.sub(r"\s+·\s+p:\S+$", "", ws.get("label") or "").lstrip("└ ").strip()
+    return label or f"space {ws.get('number')}"
+
+
+def places(snap, crew):
+    """The spaces and agents the nav lists, in herdr's order."""
+    here_ws, here_pane = snap.get("focused_workspace_id"), snap.get("focused_pane_id")
+    numbers = {w.get("workspace_id"): w.get("number") for w in snap.get("workspaces", [])}
+    spaces = [{"id": w.get("workspace_id"), "n": w.get("number"), "label": space_label(w, crew),
+               "state": HERDR_STATE.get(w.get("agent_status"), "idle"), "here": w.get("workspace_id") == here_ws,
+               "crew": crew_space(w, crew), "deck": w.get("label") == DECK_SPACE}
+              for w in snap.get("workspaces", [])]
+    agents = [{"pane": a.get("pane_id"), "name": a.get("display_agent") or a.get("agent") or "agent",
+               "state": HERDR_STATE.get(a.get("agent_status"), "idle"), "doing": a.get("terminal_title_stripped") or "",
+               "n": numbers.get(a.get("workspace_id")), "here": a.get("pane_id") == here_pane}
+              for a in snap.get("agents", [])]
+    return {"spaces": spaces, "agents": agents}
 
 
 def events(task):
@@ -300,7 +374,9 @@ def stem_at(centers):
     return centers[mid] if len(centers) % 2 else (centers[mid - 1] + centers[mid]) // 2
 
 
-def frame_lines(data, width, frame=0):
+def frame_lines(data, width, frame=0, hits=None, top=0):
+    """The fleet chart. With a hits list, each clickable stretch is recorded as (line, x0, x1, ("agent", pane)),
+    counting lines from top."""
     crew = data["crew"]
     hands = sum(1 for c in crew for a in c["agents"] if a[1])
     waiting = sum(1 for c in crew if c["state"] == "decision")
@@ -311,6 +387,8 @@ def frame_lines(data, width, frame=0):
              row([part("first mate", DIM)], width, stem),
              row([part(f"{len(crew)} crew · {hands} agents at work", DIM)]
                  + ([part(f" · {waiting} need you", RED, bold=True)] if waiting else []), width, stem)]
+    if hits is not None and data.get("root_pane"):
+        hits.extend((top + y, 0, width, ("agent", data["root_pane"])) for y in range(2))
     if not crew:
         return lines + ["", row([part("calm seas, no crew out", DIM)], width)]
     lines.append(row([part("│", TEAL)], width, stem))
@@ -328,6 +406,9 @@ def frame_lines(data, width, frame=0):
             lines.append(row([part("│", TEAL)], width))
         blocks = [column(c, colw, frame) for c in group]
         for r in range(max(len(b) for b in blocks)):
+            if hits is not None:
+                hits.extend((top + len(lines), i * colw, (i + 1) * colw, ("agent", c["pane"]))
+                            for i, c in enumerate(group) if c.get("pane") and r < len(blocks[i]))
             lines.append("".join(b[r] if r < len(b) else " " * colw for b in blocks))
         lines.append("")
     log = sorted(((at, c["name"], word, text) for c in crew for at, word, text in c["events"] if at),
@@ -335,7 +416,7 @@ def frame_lines(data, width, frame=0):
     if log:
         lines.append(paint(TEAL, "─── deck log " + "─" * (width - 13)))
         for at, name, word, text in log:
-            stamp = time.strftime("%H:%M", time.localtime(at))
+            stamp = time.strftime("%H:%M" if time.time() - at < 43200 else "%b %d", time.localtime(at))
             lines.append(row([part(stamp + " ", DIM), part(name.split(" ")[0] + " ", GOLD),
                               part(word + " ", EVENT.get(word, DIM)), part(text, TEXT)], width, align="left"))
         lines.append("")
@@ -345,7 +426,51 @@ def frame_lines(data, width, frame=0):
     return lines
 
 
-LOG_SHOWN = 5
+LOG_SHOWN = 4
+
+
+def rule(title, width):
+    return paint(TEAL, f"─── {title} " + "─" * max(0, width - cells(title) - 5))
+
+
+def nav_lines(data, width, frame=0, cursor=None, hits=None):
+    """The nav: spaces, then agents, then the fleet chart. Returns (lines, items): items are the pickable places
+    in order, and hits (when given) maps each clickable stretch to one."""
+    hits = [] if hits is None else hits
+    lines, items = [rule("spaces", width)], []
+    for s in data.get("spaces", []):
+        picked = cursor == len(items)
+        hits.append((len(lines), 0, width, ("space", s["id"])))
+        items.append(("space", s["id"]))
+        tag = "  crew" if s["crew"] else "  deck" if s["deck"] else ""
+        lines.append(row([part("▸ " if picked else "  ", GOLD, bold=True),
+                          part(f"{s['n']} ", GOLD if s["here"] else DIM, bold=s["here"]), mark(s["state"], frame),
+                          part(" " + s["label"], TEXT if s["here"] or picked else SUBTEXT, bold=s["here"]),
+                          part(tag, DIM)], width, align="left"))
+    lines += ["", rule("agents", width)]
+    for a in data.get("agents", []):
+        picked = cursor == len(items)
+        hits.append((len(lines), 0, width, ("agent", a["pane"])))
+        items.append(("agent", a["pane"]))
+        lines.append(row([part("▸ " if picked else "  ", GOLD, bold=True), mark(a["state"], frame),
+                          part(" " + a["name"] + " ", GOLD, bold=a["here"]),
+                          part(f"{a['n']} · " if a["n"] else "", DIM), part(a["doing"], SUBTEXT)],
+                         width, align="left"))
+    if not data.get("agents"):
+        lines.append(row([part("  no agents running", DIM)], width, align="left"))
+    lines += ["", rule("fleet", width)]
+    lines += frame_lines(data, width, frame, hits, len(lines))
+    return lines, items
+
+
+def hint_line(width, focused):
+    if not focused:
+        return row([part("prefix+m nav · prefix+d deck", DIM)], width, align="left")
+    keys = (("↑↓", "pick"), ("⏎", "go"), ("1-9", "space"), ("d", "deck"), ("f", "first mate"), ("esc", "back"))
+    parts = []
+    for key, what in keys:
+        parts += [part(key, GOLD, bold=True), part(f" {what}  ", DIM)]
+    return row(parts, width, align="left")
 
 
 def line_text(data):
@@ -362,7 +487,96 @@ def line_text(data):
 
 # ---- modes ------------------------------------------------------------------------------------------------------
 
-def run_pane():
+CSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z~]")
+MOUSE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
+ARROWS = {b"\x1b[A": "up", b"\x1b[B": "down", b"\x1bOA": "up", b"\x1bOB": "down"}
+
+
+def keys_of(data):
+    """Terminal input as events: (up,) (down,) (enter,) (esc,) (char, c), (click, x, y) zero-based, (wheel, ±1)."""
+    out, i = [], 0
+    while i < len(data):
+        m = MOUSE.match(data, i)
+        if m:
+            button = int(m[1])
+            if m[4] == b"M" and button == 0:
+                out.append(("click", int(m[2]) - 1, int(m[3]) - 1))
+            elif button in (64, 65):
+                out.append(("wheel", -1 if button == 64 else 1))
+            i = m.end()
+            continue
+        arrow = next((k for k in ARROWS if data.startswith(k, i)), None)
+        if arrow:
+            out.append((ARROWS[arrow],))
+            i += len(arrow)
+            continue
+        m = CSI.match(data, i)
+        if m:  # focus reports and other keys the nav does not use
+            i = m.end()
+            continue
+        c = data[i:i + 1]
+        out.append(("esc",) if c == b"\x1b" else ("enter",) if c in (b"\r", b"\n") else
+                   ("char", c.decode("utf-8", "ignore")))
+        i += 1
+    return out
+
+
+def hit_at(hits, x, y):
+    return next((place for line, x0, x1, place in hits if line == y and x0 <= x < x1), None)
+
+
+def go(place):
+    """Focus a space or an agent's pane; herdr switches space and tab to it."""
+    kind, target = place
+    if kind == "space":
+        herdr("workspace", "focus", target)
+    else:
+        focus_pane(target)
+
+
+def hostable(snap, data, tab):
+    """Whether the nav column may live in this tab: not a crew space, not the deck's, not zoomed."""
+    layout = next((l for l in snap.get("layouts", []) if l.get("tab_id") == tab), None)
+    ws = next((s for s in data.get("spaces", []) if layout and s["id"] == layout.get("workspace_id")), None)
+    return bool(layout and ws and not ws["crew"] and not ws["deck"] and not layout.get("zoomed")), layout
+
+
+def right_edge(layout):
+    """The pane to split from: the one on the tab's right edge, tallest, then topmost."""
+    return max(layout["panes"], key=lambda p: (p["rect"]["x"] + p["rect"]["width"], p["rect"]["height"],
+                                               -p["rect"]["y"]))
+
+
+def ratio_for(width):
+    """The share a pane of this width keeps when the nav splits off its right side."""
+    return max(0.5, min(0.85, 1 - WIDTH / width)) if width else 0.7
+
+
+def state_path(name):
+    root = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.expanduser("~/.local/state/qd")
+    os.makedirs(root, exist_ok=True)
+    return os.path.join(root, name)
+
+
+def remember(name, value):
+    try:
+        open(state_path(name), "w").write(value + "\n")
+    except OSError:
+        pass
+
+
+def recall(name):
+    try:
+        return open(state_path(name)).read().strip()
+    except OSError:
+        return ""
+
+
+def navs(snap):
+    return [p for p in snap.get("panes", []) if p.get("label") == NAV_TITLE]
+
+
+def run_pane(popup=False):
     import termios
     import tty
     fd = sys.stdin.fileno()
@@ -370,89 +584,179 @@ def run_pane():
     if saved:
         tty.setcbreak(fd)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    sys.stdout.write("\x1b[?25l")
-    frame, data, fetched = 0, None, 0.0
+    sys.stdout.write("\x1b[?25l\x1b[?1000h\x1b[?1006h")  # hide the cursor; report clicks and the wheel
+    first = snapshot()
+    me = next((p.get("terminal_id") for p in first.get("panes", [])
+               if p.get("pane_id") == os.environ.get("HERDR_PANE_ID")), None)
+    frame, data, fetched, cursor, away_since, hits, items = 0, None, 0.0, None, None, [], []
     try:
         while True:
-            if time.time() - fetched >= 2:
-                data, fetched = fleet(), time.time()
+            now = time.time()
+            snap = snapshot()
+            mine = next((p for p in snap.get("panes", []) if me and p.get("terminal_id") == me), None)
+            focused = bool(mine) and snap.get("focused_pane_id") == mine["pane_id"]
+            if not popup and snap.get("focused_pane_id") and not focused:
+                remember("last-pane", snap["focused_pane_id"])
+            if data is None or now - fetched >= 2:
+                data, fetched = fleet(snap, now), now
+            else:
+                data.update(places(snap, data["crew"]))
+            if not popup and mine and mine.get("tab_id") != snap.get("focused_tab_id"):
+                away_since = away_since or now
+                ok, layout = hostable(snap, data, snap.get("focused_tab_id"))
+                if ok and now - away_since >= FOLLOW_AFTER:
+                    target = right_edge(layout)
+                    herdr("pane", "move", mine["pane_id"], "--tab", layout["tab_id"], "--target-pane",
+                          target["pane_id"], "--split", "right", "--ratio", f"{ratio_for(target['rect']['width']):.3f}",
+                          "--no-focus")
+                    away_since = None
+            else:
+                away_since = None
+            if not (focused or popup):  # unfocused, the pointer rests on the space in view
+                cursor = next((i for i, s in enumerate(data["spaces"]) if s["here"]), None)
             size = os.get_terminal_size()
-            # two cells spare: herdr draws some of these symbols wider than Python counts them
-            lines = frame_lines(data, size.columns - 2, frame)[:size.lines]
+            width = size.columns - 2  # two cells spare: herdr draws some symbols wider than Python counts them
+            hits = []
+            lines, items = nav_lines(data, width, frame, cursor, hits)
+            lines = lines[:max(0, size.lines - 1)]
+            lines += [""] * (size.lines - 1 - len(lines)) + [hint_line(width, focused or popup)]
             sys.stdout.write("\x1b[H" + "".join(f"{l}\x1b[K\n" for l in lines[:-1]) + lines[-1] + "\x1b[K\x1b[J")
             sys.stdout.flush()
             frame += 1
-            if saved and select.select([fd], [], [], 0.5)[0] and os.read(fd, 16)[:1] in (b"q", b"Q"):
-                return
             if not saved:
-                time.sleep(0.5)
+                time.sleep(POLL)
+                continue
+            if not select.select([fd], [], [], POLL)[0]:
+                continue
+            for key in keys_of(os.read(fd, 256)):
+                place = None
+                if key[0] in ("up", "down", "wheel") and items:
+                    step = -1 if key[0] == "up" else 1 if key[0] == "down" else key[1]
+                    cursor = min(len(items) - 1, max(0, (cursor if cursor is not None else -step) + step))
+                elif key[0] == "enter" and cursor is not None and cursor < len(items):
+                    place = items[cursor]
+                elif key[0] == "click":
+                    place = hit_at(hits, key[1], key[2])
+                elif key[0] == "char" and key[1].isdigit():
+                    place = next((("space", s["id"]) for s in data["spaces"] if str(s["n"]) == key[1]), None)
+                elif key[0] == "char" and key[1] == "d":
+                    deck()
+                    if popup:
+                        return
+                elif key[0] == "char" and key[1] == "f" and data.get("root_pane"):
+                    place = ("agent", data["root_pane"])
+                elif key[0] == "esc" or key[0] == "char" and key[1] in "qQ":
+                    if popup:
+                        return
+                    last = recall("last-pane")
+                    if last and last in panes(snap):
+                        focus_pane(last)
+                if place:
+                    go(place)
+                    if popup:
+                        return
     except KeyboardInterrupt:
         pass
     finally:
-        sys.stdout.write("\x1b[0m\x1b[?25h")
+        sys.stdout.write("\x1b[?1006l\x1b[?1000l\x1b[0m\x1b[?25h")
         if saved:
             termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
-def state_file():
-    root = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.expanduser("~/.local/state/qd")
-    os.makedirs(root, exist_ok=True)
-    return os.path.join(root, "minimap-pane")
+def open_nav(snap, layout):
+    """Open the nav column at the right of a tab; its pane id, or '' when herdr refused."""
+    target = right_edge(layout)
+    before = set(panes(snap))
+    herdr("plugin", "pane", "open", "--plugin", PLUGIN, "--entrypoint", "map", "--placement", "split",
+          "--direction", "right", "--target-pane", target["pane_id"], "--no-focus")
+    new = next((p for p in panes() if p not in before), "")
+    if new:
+        area = layout.get("area") or {}
+        rect = next((p["rect"] for p in (snapshot().get("layouts") or []) for p in p.get("panes", [])
+                     if p.get("pane_id") == new), None)
+        if rect and area.get("width"):
+            # herdr resizes a split by a share of the tab; move the nav's left edge right until it is WIDTH wide
+            herdr("pane", "resize", "--pane", new, "--direction", "right",
+                  "--amount", f"{max(0.0, (rect['width'] - WIDTH) / area['width']):.3f}")
+    return new
 
 
-def opened(*args):
-    """Open a plugin pane; its new pane id, or '' when herdr refused."""
-    before = set(panes())
-    herdr("plugin", "pane", "open", *args, "--placement", "split", "--no-focus")
-    return next((p for p in panes() if p not in before), "")
-
-
-def rect_of(pane):
-    layout = herdr("pane", "layout", "--pane", pane).get("layout") or {}
-    rect = next((p["rect"] for p in layout.get("panes", []) if p["pane_id"] == pane), None)
-    return rect, layout.get("area") or {}
+def home_layout(snap, data):
+    """The tab the nav column opens in when the focused one cannot hold it: the first mate's, else any that can."""
+    root_tab = next((p.get("tab_id") for p in snap.get("panes", []) if p.get("pane_id") == data.get("root_pane")), None)
+    for tab in [snap.get("focused_tab_id"), root_tab] + [l.get("tab_id") for l in snap.get("layouts", [])]:
+        ok, layout = hostable(snap, data, tab)
+        if ok:
+            return layout
+    return None
 
 
 def toggle():
-    """Open the map at the right of the first mate's tab with Captain's Deck under it when installed; or close both."""
-    live = panes()
-    try:
-        ids = open(state_file()).read().split()
-    except OSError:
-        ids = []
-    if any(i in live for i in ids):
-        for i in ids:
-            if i in live:
-                herdr("plugin", "pane", "close", i)
-        os.remove(state_file())
+    """prefix+m: focus the nav in this tab, step back out of it when it has focus, or pop it up in a crew space."""
+    snap = snapshot()
+    data = fleet(snap)
+    tab, live = snap.get("focused_tab_id"), navs(snap)
+    here = next((p for p in live if p.get("tab_id") == tab), None)
+    if here and here["pane_id"] == snap.get("focused_pane_id"):
+        last = recall("last-pane")
+        if last and last in panes(snap):
+            focus_pane(last)
         return
-    root = next((p for p in live.values() if "first mate" in (p.get("label") or "")), None)
-    target = root["pane_id"] if root else os.environ.get("HERDR_PANE_ID", "")
-    mapped = opened("--plugin", PLUGIN, "--entrypoint", "map", "--direction", "right",
-                    *(["--target-pane", target] if target else []))
-    if not mapped:
+    if here:
+        focus_pane(here["pane_id"])
         return
-    ids = [mapped]
-    rect, area = rect_of(mapped)
-    if rect and area.get("width"):
-        # herdr resizes a split by a share of the tab; move the map's left edge right until it is WIDTH wide
-        herdr("pane", "resize", "--pane", mapped, "--direction", "right",
-              "--amount", f"{max(0.0, (rect['width'] - WIDTH) / area['width']):.3f}")
-    deck = opened("--plugin", DECK, "--entrypoint", "flow", "--direction", "down", "--target-pane", mapped)
-    if deck:
-        ids.append(deck)
-        rect, area = rect_of(mapped)
-        if rect and area.get("height"):
-            # the map keeps MAP_ROWS rows; the deck takes the rest of the column
-            herdr("pane", "resize", "--pane", mapped, "--direction", "up",
-                  "--amount", f"{max(0.0, (rect['height'] - MAP_ROWS) / area['height']):.3f}")
-    open(state_file(), "w").write("\n".join(ids) + "\n")
+    ok, layout = hostable(snap, data, tab)
+    if ok and not live:
+        new = open_nav(snap, layout)
+        if new:
+            focus_pane(new)
+        return
+    if not live and home_layout(snap, data):
+        open_nav(snap, home_layout(snap, data))
+    herdr("plugin", "pane", "open", "--plugin", PLUGIN, "--entrypoint", "pick", "--focus")
+
+
+def deck():
+    """prefix+d: Captain's Deck in its own space, opened beside the focused pane and moved there the first time."""
+    snap = snapshot()
+    space = next((w for w in snap.get("workspaces", []) if w.get("label") == DECK_SPACE), None)
+    if space:
+        herdr("workspace", "focus", space["workspace_id"])
+        return
+    before = set(panes(snap))
+    herdr("plugin", "pane", "open", "--plugin", DECK, "--entrypoint", "flow", "--placement", "split", "--no-focus")
+    new = next((p for p in panes() if p not in before), "")
+    if new:
+        herdr("pane", "move", new, "--new-workspace", "--label", DECK_SPACE, "--focus")
+
+
+def ensure(startup=True):
+    """Open the nav column if none is open: at startup once herdr has restored its spaces, and after a space or tab
+    closes, which takes the column with it when it was there."""
+    for _ in range(30 if startup else 1):
+        time.sleep(1)
+        snap = snapshot()
+        if snap.get("workspaces"):
+            break
+    else:
+        return
+    if startup:
+        time.sleep(2)  # let restored panes settle, so a restored nav is seen
+    snap = snapshot()
+    data = fleet(snap)
+    layout = home_layout(snap, data)
+    if not navs(snap) and layout:
+        open_nav(snap, layout)
 
 
 def main(argv):
     global COLOR
     if "--toggle" in argv:
         return toggle()
+    if "--deck" in argv:
+        return deck()
+    if "--ensure" in argv:
+        return ensure(startup=os.environ.get("HERDR_PLUGIN_EVENT", "startup") == "startup")
     if "--line" in argv:
         COLOR = False
         print(line_text(fleet()))
@@ -460,9 +764,9 @@ def main(argv):
     if "--once" in argv:
         COLOR = sys.stdout.isatty() or "--color" in argv
         width = os.get_terminal_size().columns if sys.stdout.isatty() else WIDTH
-        print("\n".join(frame_lines(fleet(), width)))
+        print("\n".join(nav_lines(fleet(), width)[0]))
         return
-    run_pane()
+    run_pane(popup="--popup" in argv)
 
 
 if __name__ == "__main__":
