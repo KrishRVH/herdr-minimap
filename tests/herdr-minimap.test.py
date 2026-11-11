@@ -165,11 +165,27 @@ class Nav(unittest.TestCase):
         self.assertEqual(mm.hit_at(hits, 5, next(l for l, _, _, p in hits if p == ("space", "w3"))), ("space", "w3"))
         self.assertIsNone(mm.hit_at(hits, 5, 0), "the section rule is not a place")
 
-    def test_the_column_stays_out_of_crew_and_deck_spaces_and_zoomed_tabs(self):
-        data = self.data()
-        self.assertTrue(mm.hostable(SNAP, data, "w1:t1")[0])
-        for tab in ("w2:t1", "w3:t1", "w4:t1", "nope"):
-            self.assertFalse(mm.hostable(SNAP, data, tab)[0], tab)
+    def test_the_column_goes_into_every_tab_but_a_zoomed_one(self):
+        snap = dict(SNAP, layouts=[dict(l, panes=l["panes"] or [{"pane_id": "x", "rect": {}}]) for l in SNAP["layouts"]])
+        for tab in ("w1:t1", "w2:t1", "w3:t1"):
+            self.assertTrue(mm.hostable(snap, tab)[0], tab)
+        self.assertFalse(mm.hostable(snap, "w4:t1")[0], "zoomed")
+        self.assertFalse(mm.hostable(snap, "nope")[0])
+
+    def test_following_moves_the_column_only_when_focus_is_in_another_tab(self):
+        moves = []
+        old = mm.herdr
+        mm.herdr = lambda *a, **k: moves.append(a) or {"move_result": {"pane": {"pane_id": "w1:p9", "tab_id": "w1:t1"}}}
+        try:
+            self.assertEqual(mm.follow(SNAP, {"pane_id": "w1:p3", "tab_id": "w1:t1"})["pane_id"], "w1:p3")
+            self.assertEqual(moves, [], "already in the focused tab")
+            self.assertEqual(mm.follow(SNAP, {"pane_id": "w2:p5", "tab_id": "w2:t1"})["pane_id"], "w1:p9")
+            self.assertEqual(moves[0][:7], ("pane", "move", "w2:p5", "--tab", "w1:t1", "--target-pane", "w1:p4"))
+            zoomed = dict(SNAP, focused_tab_id="w4:t1")
+            self.assertEqual(mm.follow(zoomed, {"pane_id": "w2:p5", "tab_id": "w2:t1"})["pane_id"], "w2:p5")
+            self.assertEqual(len(moves), 1, "a zoomed tab keeps the column out")
+        finally:
+            mm.herdr = old
 
     def test_the_column_splits_off_the_tallest_pane_on_the_right_edge(self):
         layout = SNAP["layouts"][0]

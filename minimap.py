@@ -6,14 +6,16 @@ the first mate, its crew and each crewmate's own agents, fanned out like a chart
   minimap.py --popup    the same nav as a popup (plugin pane "pick"); exits once a choice is made
   minimap.py --once     print one frame and exit
   minimap.py --line     one plain line for herdr's tab bar (tools/herdr.toml, ui.tab_bar_right)
-  minimap.py --toggle   prefix+m: focus the nav here, or step back out of it; in a crew space, the popup
+  minimap.py --toggle   prefix+m: focus the nav here, or step back out of it; over a zoomed tab, the popup
   minimap.py --deck     prefix+d: Captain's Deck in a space of its own, opened the first time
   minimap.py --ensure   the plugin's startup hook: open the nav column when none is open
 
 In the nav: up/down or the wheel picks, enter or a click goes, 1-9 jumps to that space, d opens the deck, f goes to
-the first mate, esc or q steps back. The column never enters a crew space (firstmate expects one pane there) or the
-deck's. It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and Claude's subagent transcripts
-(~/.claude*/projects/*/<session>/subagents); it changes only focus and its own pane. Python 3.9, standard library.
+the first mate, esc or q steps back. Like herdr's sidebar it stays in view: it moves into whichever tab has focus,
+crew spaces included (only while the captain looks at one, and firstmate's teardown never closes the tab in view),
+and pops up instead over a zoomed tab. It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and
+Claude's subagent transcripts (~/.claude*/projects/*/<session>/subagents); it changes only focus and its own pane.
+Python 3.9, standard library.
 """
 import glob
 import json
@@ -37,8 +39,9 @@ WIDTH = 56               # the nav column's width in cells
 NAV_TITLE = "⛵ nav"      # the map pane's title in herdr-plugin.toml, which is how a live nav is found
 DECK = "herdr-firstmate-flow"  # Captain's Deck (deimantasnork/captains-deck)
 DECK_SPACE = "⚓ captain's deck"  # the deck's own space
-POLL = 0.5               # seconds between looks at herdr's focus
-FOLLOW_AFTER = 0.4       # focus rests on another space this long before the column follows it
+POLL = 0.2               # seconds between looks at herdr's focus, so the column keeps up with a switch
+SETTLE = 0.3             # focus the nav did not move rests this long before the column follows: a spawn's brief
+                         # flick to a new crew space (fm-spawn restores focus) never carries the column into it
 
 # tools/herdr.toml's night colors
 GOLD, TEXT, DIM, GREEN, RED, BLUE, YELLOW, MAUVE, TEAL, SUBTEXT = (
@@ -194,7 +197,7 @@ HERDR_STATE = {"working": "working", "blocked": "decision", "done": "done"}
 
 
 def crew_space(ws, crew):
-    """A space firstmate made for a crewmate: the nav column stays out of it."""
+    """A space firstmate made for a crewmate."""
     return (ws.get("label") or "").startswith("└") or any(c.get("space") == ws.get("workspace_id") for c in crew)
 
 
@@ -534,11 +537,24 @@ def go(place):
         focus_pane(target)
 
 
-def hostable(snap, data, tab):
-    """Whether the nav column may live in this tab: not a crew space, not the deck's, not zoomed."""
+def hostable(snap, tab):
+    """Whether the nav column can sit in this tab: any tab with panes that is not zoomed."""
     layout = next((l for l in snap.get("layouts", []) if l.get("tab_id") == tab), None)
-    ws = next((s for s in data.get("spaces", []) if layout and s["id"] == layout.get("workspace_id")), None)
-    return bool(layout and ws and not ws["crew"] and not ws["deck"] and not layout.get("zoomed")), layout
+    return bool(layout and layout.get("panes") and not layout.get("zoomed")), layout
+
+
+def follow(snap, mine):
+    """Move the nav column into the focused tab beside its right-edge pane; the column's pane afterwards."""
+    tab = snap.get("focused_tab_id")
+    if not mine or not tab or mine.get("tab_id") == tab:
+        return mine
+    ok, layout = hostable(snap, tab)
+    if not ok:
+        return mine
+    target = right_edge(layout)
+    moved = herdr("pane", "move", mine["pane_id"], "--tab", tab, "--target-pane", target["pane_id"], "--split",
+                  "right", "--ratio", f"{ratio_for(target['rect']['width']):.3f}", "--no-focus")
+    return (moved.get("move_result") or {}).get("pane") or mine
 
 
 def right_edge(layout):
@@ -588,12 +604,16 @@ def run_pane(popup=False):
     first = snapshot()
     me = next((p.get("terminal_id") for p in first.get("panes", [])
                if p.get("pane_id") == os.environ.get("HERDR_PANE_ID")), None)
-    frame, data, fetched, cursor, away_since, hits, items = 0, None, 0.0, None, None, [], []
+    data, fetched, cursor, hits, items, seen = None, 0.0, None, [], [], (None, 0.0)
+
+    def mine_in(snap):
+        return next((p for p in snap.get("panes", []) if me and p.get("terminal_id") == me), None)
     try:
         while True:
             now = time.time()
+            frame = int(now * 2)  # animations at two steps a second, however often the column redraws
             snap = snapshot()
-            mine = next((p for p in snap.get("panes", []) if me and p.get("terminal_id") == me), None)
+            mine = mine_in(snap)
             focused = bool(mine) and snap.get("focused_pane_id") == mine["pane_id"]
             if not popup and snap.get("focused_pane_id") and not focused:
                 remember("last-pane", snap["focused_pane_id"])
@@ -601,17 +621,10 @@ def run_pane(popup=False):
                 data, fetched = fleet(snap, now), now
             else:
                 data.update(places(snap, data["crew"]))
-            if not popup and mine and mine.get("tab_id") != snap.get("focused_tab_id"):
-                away_since = away_since or now
-                ok, layout = hostable(snap, data, snap.get("focused_tab_id"))
-                if ok and now - away_since >= FOLLOW_AFTER:
-                    target = right_edge(layout)
-                    herdr("pane", "move", mine["pane_id"], "--tab", layout["tab_id"], "--target-pane",
-                          target["pane_id"], "--split", "right", "--ratio", f"{ratio_for(target['rect']['width']):.3f}",
-                          "--no-focus")
-                    away_since = None
-            else:
-                away_since = None
+            if snap.get("focused_tab_id") != seen[0]:
+                seen = (snap.get("focused_tab_id"), now)
+            if not popup and now - seen[1] >= SETTLE:
+                mine = follow(snap, mine)
             if not (focused or popup):  # unfocused, the pointer rests on the space in view
                 cursor = next((i for i, s in enumerate(data["spaces"]) if s["here"]), None)
             size = os.get_terminal_size()
@@ -622,7 +635,6 @@ def run_pane(popup=False):
             lines += [""] * (size.lines - 1 - len(lines)) + [hint_line(width, focused or popup)]
             sys.stdout.write("\x1b[H" + "".join(f"{l}\x1b[K\n" for l in lines[:-1]) + lines[-1] + "\x1b[K\x1b[J")
             sys.stdout.flush()
-            frame += 1
             if not saved:
                 time.sleep(POLL)
                 continue
@@ -655,6 +667,8 @@ def run_pane(popup=False):
                     go(place)
                     if popup:
                         return
+                    after = snapshot()  # follow at once rather than at the next look
+                    follow(after, mine_in(after))
     except KeyboardInterrupt:
         pass
     finally:
@@ -685,14 +699,15 @@ def home_layout(snap, data):
     """The tab the nav column opens in when the focused one cannot hold it: the first mate's, else any that can."""
     root_tab = next((p.get("tab_id") for p in snap.get("panes", []) if p.get("pane_id") == data.get("root_pane")), None)
     for tab in [snap.get("focused_tab_id"), root_tab] + [l.get("tab_id") for l in snap.get("layouts", [])]:
-        ok, layout = hostable(snap, data, tab)
+        ok, layout = hostable(snap, tab)
         if ok:
             return layout
     return None
 
 
 def toggle():
-    """prefix+m: focus the nav in this tab, step back out of it when it has focus, or pop it up in a crew space."""
+    """prefix+m: focus the nav in this tab (bringing it here first), step back out of it when it has focus, or pop
+    it up over a zoomed tab."""
     snap = snapshot()
     data = fleet(snap)
     tab, live = snap.get("focused_tab_id"), navs(snap)
@@ -705,9 +720,10 @@ def toggle():
     if here:
         focus_pane(here["pane_id"])
         return
-    ok, layout = hostable(snap, data, tab)
-    if ok and not live:
-        new = open_nav(snap, layout)
+    ok, layout = hostable(snap, tab)
+    if ok:
+        moved = follow(snap, live[0]) if live else None
+        new = moved["pane_id"] if moved else open_nav(snap, layout)
         if new:
             focus_pane(new)
         return
