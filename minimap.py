@@ -27,7 +27,9 @@ PLUGIN = "qd.minimap"
 ACTIVE_SECONDS = 90      # a subagent transcript written this recently is still at work
 RECENT_SECONDS = 600     # one finished this recently still shows, dimmed
 RECENT_SHOWN = 2         # at most this many finished agents per crewmate
-WIDTH = 64               # the pane's width in cells when --toggle opens it
+WIDTH = 64               # the column's width in cells when --toggle opens it
+MAP_ROWS = 26            # the map's height when Captain's Deck sits under it
+DECK = "herdr-firstmate-flow"  # Captain's Deck (deimantasnork/captains-deck), opened under the map when installed
 
 # tools/herdr.toml's night colors
 GOLD, TEXT, DIM, GREEN, RED, BLUE, YELLOW, MAUVE, TEAL = (
@@ -398,33 +400,53 @@ def state_file():
     return os.path.join(root, "minimap-pane")
 
 
+def opened(*args):
+    """Open a plugin pane; its new pane id, or '' when herdr refused."""
+    before = set(panes())
+    herdr("plugin", "pane", "open", *args, "--placement", "split", "--no-focus")
+    return next((p for p in panes() if p not in before), "")
+
+
+def rect_of(pane):
+    layout = herdr("pane", "layout", "--pane", pane).get("layout") or {}
+    rect = next((p["rect"] for p in layout.get("panes", []) if p["pane_id"] == pane), None)
+    return rect, layout.get("area") or {}
+
+
 def toggle():
+    """Open the map at the right of the first mate's tab with Captain's Deck under it when installed; or close both."""
     live = panes()
     try:
-        open_id = open(state_file()).read().strip()
+        ids = open(state_file()).read().split()
     except OSError:
-        open_id = ""
-    if open_id in live:
-        herdr("plugin", "pane", "close", open_id)
+        ids = []
+    if any(i in live for i in ids):
+        for i in ids:
+            if i in live:
+                herdr("plugin", "pane", "close", i)
         os.remove(state_file())
         return
     root = next((p for p in live.values() if "first mate" in (p.get("label") or "")), None)
     target = root["pane_id"] if root else os.environ.get("HERDR_PANE_ID", "")
-    args = ["plugin", "pane", "open", "--plugin", PLUGIN, "--entrypoint", "map", "--placement", "split",
-            "--direction", "right", "--no-focus"] + (["--target-pane", target] if target else [])
-    before = set(live)
-    herdr(*args)
-    new = [p for p in panes() if p not in before]
-    if not new:
+    mapped = opened("--plugin", PLUGIN, "--entrypoint", "map", "--direction", "right",
+                    *(["--target-pane", target] if target else []))
+    if not mapped:
         return
-    open(state_file(), "w").write(new[0])
-    layout = herdr("pane", "layout", "--pane", new[0]).get("layout") or {}
-    rect = next((p["rect"] for p in layout.get("panes", []) if p["pane_id"] == new[0]), None)
-    area = layout.get("area") or {}
+    ids = [mapped]
+    rect, area = rect_of(mapped)
     if rect and area.get("width"):
-        # herdr resizes a split by a share of the tab's width; move the edge right until the map is WIDTH wide
-        herdr("pane", "resize", "--pane", new[0], "--direction", "right",
+        # herdr resizes a split by a share of the tab; move the map's left edge right until it is WIDTH wide
+        herdr("pane", "resize", "--pane", mapped, "--direction", "right",
               "--amount", f"{max(0.0, (rect['width'] - WIDTH) / area['width']):.3f}")
+    deck = opened("--plugin", DECK, "--entrypoint", "flow", "--direction", "down", "--target-pane", mapped)
+    if deck:
+        ids.append(deck)
+        rect, area = rect_of(mapped)
+        if rect and area.get("height"):
+            # the map keeps MAP_ROWS rows; the deck takes the rest of the column
+            herdr("pane", "resize", "--pane", mapped, "--direction", "up",
+                  "--amount", f"{max(0.0, (rect['height'] - MAP_ROWS) / area['height']):.3f}")
+    open(state_file(), "w").write("\n".join(ids) + "\n")
 
 
 def main(argv):
