@@ -27,7 +27,7 @@ PLUGIN = "qd.minimap"
 ACTIVE_SECONDS = 90      # a subagent transcript written this recently is still at work
 RECENT_SECONDS = 600     # one finished this recently still shows, dimmed
 RECENT_SHOWN = 2         # at most this many finished agents per crewmate
-WIDTH = 64               # the column's width in cells when --toggle opens it
+WIDTH = 90               # the column's width in cells when --toggle opens it
 MAP_ROWS = 26            # the map's height when Captain's Deck sits under it
 DECK = "herdr-firstmate-flow"  # Captain's Deck (deimantasnork/captains-deck), opened under the map when installed
 

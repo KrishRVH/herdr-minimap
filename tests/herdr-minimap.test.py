@@ -59,7 +59,7 @@ class Chart(unittest.TestCase):
 
     def test_lines_fit_the_width(self):
         long = crewmate("a-very-long-task-name-that-will-not-fit", agents=[("a description far too long " * 3, True, 2)])
-        for width in (30, 40, 64):
+        for width in (30, 40, 64, 90):
             for line in self.draw(long, crewmate("b"), crewmate("c"), crewmate("d"), width=width):
                 self.assertLessEqual(mm.cells(line), width, line)
 
