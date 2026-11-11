@@ -31,7 +31,7 @@ title = "⛵ nav"
 placement = "split"
 command = ["/usr/bin/env", "python3", "minimap.py"]
 
-# the same nav over a crew space or the deck, where the column does not go
+# the same nav over a zoomed tab, where the column does not go
 [[panes]]
 id = "pick"
 title = "⛵ nav"
@@ -40,7 +40,7 @@ width = 60
 height = "85%"
 command = ["/usr/bin/env", "python3", "minimap.py", "--popup"]
 
-# closing a space or tab closes the nav column with it when it was there: open it again in the first mate's tab
+# closing a space or tab closes the nav column with it when it was there: open it again
 [[events]]
 on = "workspace.closed"
 command = ["/usr/bin/env", "python3", "minimap.py", "--ensure"]

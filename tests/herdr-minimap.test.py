@@ -219,6 +219,7 @@ class Nav(unittest.TestCase):
         self.assertEqual(mm.keys_of(b"\x1b[<0;12;4M\x1b[<0;12;4m"), [("click", 11, 3)])
         self.assertEqual(mm.keys_of(b"\x1b[<64;1;1M\x1b[<65;1;1M"), [("wheel", -1), ("wheel", 1)])
         self.assertEqual(mm.keys_of(b"\x1b[I2"), [("char", "2")], "a focus report is skipped")
+        self.assertEqual(mm.keys_of("é".encode()), [], "a wider character is no key, not an empty q")
 
 
 if __name__ == "__main__":
