@@ -1,13 +1,17 @@
 #!/usr/bin/python3
-"""tools/herdr-minimap/minimap.py: the fan's shape, the states it shows, and which agents count as at work."""
+"""tools/herdr-minimap: the nav's fan, the states it shows, which agents count as at work, and the bonsai."""
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "herdr-minimap"))
+import bonsai  # noqa: E402
+
 spec = importlib.util.spec_from_file_location("minimap", os.path.join(HERE, "..", "herdr-minimap", "minimap.py"))
 mm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mm)
@@ -220,6 +224,98 @@ class Nav(unittest.TestCase):
         self.assertEqual(mm.keys_of(b"\x1b[<64;1;1M\x1b[<65;1;1M"), [("wheel", -1), ("wheel", 1)])
         self.assertEqual(mm.keys_of(b"\x1b[I2"), [("char", "2")], "a focus report is skipped")
         self.assertEqual(mm.keys_of("é".encode()), [], "a wider character is no key, not an empty q")
+
+
+
+def usage(message, day, tokens, request="r"):
+    return json.dumps({"type": "assistant", "requestId": request, "timestamp": f"{day}T12:00:00Z",
+                       "message": {"id": message, "usage": {"input_tokens": tokens, "output_tokens": 0}}}) + "\n"
+
+
+class Bonsai(unittest.TestCase):
+    def tree(self, px):
+        return {p for p, c in px.items() if c in bonsai.BARK or c in bonsai.LEAF or c == bonsai.BLOSSOM}
+
+    def test_it_grows_quickly_while_young_and_tops_out_when_mature(self):
+        self.assertEqual(bonsai.growth(0), 0)
+        self.assertEqual(bonsai.growth(bonsai.MATURE * 4), 1)
+        steps = [bonsai.growth(t) for t in (1e8, 1e9, 1e10, 1e11)]
+        self.assertEqual(steps, sorted(steps))
+        self.assertGreater((steps[1] - steps[0]) / 9e8, (steps[3] - steps[2]) / 9e10, "young, a token grows it most")
+        self.assertEqual(bonsai.stage(bonsai.growth(11.3e9)), "sapling")
+
+    def test_more_tokens_make_a_bigger_tree_that_stays_on_the_canvas(self):
+        sizes = []
+        for g in (0, 0.1, 0.3, 0.5, 0.7, 0.9):
+            px = bonsai.pixels(g)
+            self.assertEqual(px, bonsai.pixels(g), "the same tree every time")
+            self.assertTrue(all(0 <= x < bonsai.W and 0 <= y < bonsai.H for x, y in px))
+            sizes.append(len(self.tree(px)))
+        self.assertEqual(sizes, sorted(sizes))
+        self.assertGreater(sizes[-1], sizes[0] * 10)
+
+    def test_detail_arrives_with_age(self):
+        young, old = set(bonsai.pixels(0.6).values()), set(bonsai.pixels(1).values())
+        self.assertNotIn(bonsai.BLOSSOM, young)
+        self.assertNotIn(bonsai.DEADWOOD, young)
+        self.assertNotIn(bonsai.LEAF[3], set(bonsai.pixels(0.5).values()), "the lit shade comes with age")
+        self.assertTrue({bonsai.BLOSSOM, bonsai.DEADWOOD, bonsai.STONE, bonsai.LEAF[3]} <= old)
+
+    def test_half_blocks_stack_two_pixels_to_a_cell(self):
+        rgb = lambda c, bg: f"<{'b' if bg else 'f'}{c}>"  # noqa: E731
+        lines = bonsai.rows({(0, 0): "a", (0, 1): "b", (1, 0): "a", (2, 1): "c", (3, 0): "d", (3, 1): "d"}, rgb)
+        self.assertEqual(len(lines), bonsai.ROWS)
+        self.assertTrue(lines[0].startswith("<fa><bb>▀\x1b[0m<fa>▀\x1b[0m<fc>▄\x1b[0m<fd>█\x1b[0m "))
+        self.assertEqual(lines[1], " " * bonsai.W)
+
+    def test_tokens_count_each_message_once_and_never_shrink(self):
+        with tempfile.TemporaryDirectory() as home:
+            folder = os.path.join(home, ".claude", "projects", "p")
+            os.makedirs(os.path.join(folder, "sid", "subagents"))
+            first = os.path.join(folder, "a.jsonl")
+            with open(first, "w") as f:
+                f.write(usage("m1", "2026-11-10", 100) + usage("m1", "2026-11-10", 100) + "not json\n")
+            with open(os.path.join(folder, "resumed.jsonl"), "w") as f:
+                f.write(usage("m1", "2026-11-10", 100) + usage("m2", "2026-11-11", 5))
+            subagent = os.path.join(folder, "sid", "subagents", "agent-x.jsonl")
+            with open(subagent, "w") as f:
+                f.write(usage("m3", "2026-11-10", 7))
+            saved = {k: os.environ.get(k) for k in ("HOME", "XDG_STATE_HOME")}
+            os.environ.update(HOME=home, XDG_STATE_HOME=os.path.join(home, "state"))
+            try:
+                self.assertEqual(bonsai.stored(), 0)
+                self.assertEqual(bonsai.tokens(), 112, "a message repeated in a line or a resumed copy counts once")
+                os.remove(first)
+                os.remove(subagent)
+                self.assertEqual(bonsai.tokens(), 112, "transcripts pruned for age leave their day's count")
+                with open(os.path.join(folder, "b.jsonl"), "w") as f:
+                    f.write(usage("m4", "2026-11-11", 30))
+                self.assertEqual(bonsai.tokens(), 142)
+                self.assertEqual(bonsai.stored(), 142)
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
+    def test_the_bonsai_sits_at_the_foot_only_when_it_fits(self):
+        art = ["tree1", "tree2"]
+        self.assertEqual(mm.screen(["nav"], 6, "hint", art), ["nav", "", "", "tree1", "tree2", "hint"])
+        self.assertEqual(mm.screen(["nav"] * 3, 6, "hint", art), ["nav"] * 3 + ["", "", "hint"], "no gap, no tree")
+        self.assertEqual(mm.screen(["nav"] * 9, 6, "hint", art), ["nav"] * 5 + ["hint"])
+
+    def test_its_caption_names_the_stage_and_the_tokens(self):
+        mm.COLOR = True
+        try:
+            lines = mm.bonsai_lines(11.3e9, 54)
+            self.assertEqual(len(lines), bonsai.ROWS)
+            self.assertIn("sapling", lines[-2])
+            self.assertIn("11.3B tokens", lines[-1])
+            self.assertEqual(mm.bonsai_lines(11.3e9, bonsai.W + 4), [], "too narrow for the tree and its caption")
+        finally:
+            mm.COLOR = False
+        self.assertEqual(mm.bonsai_lines(11.3e9, 54), [], "no color, no pixels")
 
 
 if __name__ == "__main__":

@@ -13,8 +13,9 @@ the first mate, its crew and each crewmate's own agents, fanned out like a chart
 In the nav: up/down or the wheel picks, enter or a click goes, 1-9 jumps to that space, d opens the deck, f goes to
 the first mate, esc or q steps back. Like herdr's sidebar it stays in view: it moves into whichever tab has focus,
 crew spaces included (only while the captain looks at one, and firstmate's teardown never closes the tab in view),
-and pops up instead over a zoomed tab. It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and
-Claude's subagent transcripts (~/.claude*/projects/*/<session>/subagents); it changes only focus and its own pane.
+and pops up instead over a zoomed tab. Below the nav, where there is room, a pixel bonsai grows with the captain's
+Claude token usage (bonsai.py). It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and Claude's
+transcripts (~/.claude*/projects); it changes only focus, its own pane and the bonsai's token store.
 Python 3.9, standard library.
 """
 import glob
@@ -26,8 +27,11 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
+
+import bonsai
 
 FM_HOME = os.environ.get("FM_HOME") or os.path.expanduser("~/dev")
 HERDR = os.environ.get("HERDR_BIN_PATH") or "herdr"
@@ -42,6 +46,7 @@ NAV_TITLE = "⛵ nav"      # the map pane's title in herdr-plugin.toml, which is
 DECK = "herdr-firstmate-flow"  # Captain's Deck (deimantasnork/captains-deck)
 DECK_SPACE = "⚓ captain's deck"  # the deck's own space
 POLL = 0.2               # seconds between looks at herdr's focus, so the column keeps up with a switch
+RECOUNT = 600            # seconds between token counts for the bonsai
 SETTLE = 0.3             # focus the nav did not move rests this long before the column follows: a spawn's brief
                          # flick to a new crew space (fm-spawn restores focus) never carries the column into it
 
@@ -501,6 +506,34 @@ def nav_lines(data, width, frame=0, cursor=None, hits=None):
     return lines, items
 
 
+def amount(n):
+    """1234567 -> '1.2M'."""
+    for size, unit in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return str(int(n))
+
+
+def bonsai_lines(count, width):
+    """The bonsai for this many tokens, at the right, with its stage and the count beside its pot; none when the
+    column is too narrow or has no color."""
+    if not COLOR or width < bonsai.W + 14:
+        return []
+    g = bonsai.growth(count)
+    art, left = bonsai.rows(bonsai.pixels(g)), width - bonsai.W
+    caption = {len(art) - 2: part(bonsai.stage(g), SUBTEXT), len(art) - 1: part(f"{amount(count)} tokens", DIM)}
+    return [(row([caption[i]], left, align="left") if i in caption else " " * left) + line
+            for i, line in enumerate(art)]
+
+
+def screen(lines, height, hint, art=()):
+    """The pane's lines: the nav cut to fit above the hint line, and the bonsai at the foot when it fits below."""
+    lines = lines[:max(0, height - 1)]
+    room = height - 1 - len(lines)
+    art = list(art) if room > len(art) else []
+    return lines + [""] * (room - len(art)) + art + [hint]
+
+
 def hint_line(width, focused):
     if not focused:
         return row([part("prefix+m nav · prefix+d deck", DIM)], width, align="left")
@@ -646,6 +679,14 @@ def run_pane(popup=False):
     me = next((p.get("terminal_id") for p in first.get("panes", [])
                if p.get("pane_id") == os.environ.get("HERDR_PANE_ID")), None)
     data, fetched, cursor, seen = None, 0.0, None, (None, 0.0)
+    count, art = [bonsai.stored()], {}
+
+    def recount():  # the column keeps the count fresh; a popup only reads it
+        while True:
+            count[0] = bonsai.tokens()
+            time.sleep(RECOUNT)
+    if not popup:
+        threading.Thread(target=recount, daemon=True).start()
 
     def mine_in(snap):
         return next((p for p in snap.get("panes", []) if me and p.get("terminal_id") == me), None)
@@ -672,8 +713,10 @@ def run_pane(popup=False):
             width = size.columns - 2  # two cells spare: herdr draws some symbols wider than Python counts them
             hits = []
             lines, items = nav_lines(data, width, frame, cursor, hits)
-            lines = lines[:max(0, size.lines - 1)]
-            lines += [""] * (size.lines - 1 - len(lines)) + [hint_line(width, focused or popup)]
+            if (count[0], width) not in art:
+                art.clear()
+                art[(count[0], width)] = bonsai_lines(count[0], width)
+            lines = screen(lines, size.lines, hint_line(width, focused or popup), art[(count[0], width)])
             sys.stdout.write("\x1b[H" + "".join(f"{l}\x1b[K\n" for l in lines[:-1]) + lines[-1] + "\x1b[K\x1b[J")
             sys.stdout.flush()
             if not saved:
