@@ -1,0 +1,21 @@
+# The fleet minimap: the first mate, its crew and each crewmate's agents, fanned out at the right of the first
+# mate's tab. `qd setup` links this folder (herdr plugin link); tools/herdr.toml binds prefix+m to the toggle and
+# puts the one-line version in the tab bar.
+id = "qd.minimap"
+name = "Fleet minimap"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "The first mate, its crew and their agents, fanned out like a chart"
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "toggle"
+title = "Toggle the fleet minimap"
+contexts = ["workspace"]
+command = ["/usr/bin/env", "python3", "minimap.py", "--toggle"]
+
+[[panes]]
+id = "map"
+title = "⛵ fleet"
+placement = "split"
+command = ["/usr/bin/env", "python3", "minimap.py"]
