@@ -4,9 +4,9 @@
 # puts the one-line version in the tab bar.
 id = "qd.minimap"
 name = "Fleet minimap"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.9.5"
-description = "The nav column: spaces, agents, and the first mate's crew fanned out like a chart"
+description = "The nav column: spaces, agents, and the first mate's crew fanned out like a chart, with a bonsai under it"
 platforms = ["macos", "linux"]
 
 # open the nav column once herdr has restored its spaces, since the sidebar starts hidden
@@ -30,6 +30,13 @@ id = "map"
 title = "⛵ nav"
 placement = "split"
 command = ["/usr/bin/env", "python3", "minimap.py"]
+
+# the bonsai under the nav column, which moves with it and keeps the height the captain gives it
+[[panes]]
+id = "tree"
+title = "🌳 bonsai"
+placement = "split"
+command = ["/usr/bin/env", "python3", "minimap.py", "--tree"]
 
 # the same nav over a zoomed tab, where the column does not go
 [[panes]]

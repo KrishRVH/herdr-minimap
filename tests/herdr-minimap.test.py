@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""tools/herdr-minimap: the nav's fan, the states it shows, which agents count as at work, and the bonsai."""
+"""tools/herdr-minimap: the nav's fan, the states it shows, which agents count as at work, and the bonsai pane."""
 import importlib.util
 import json
 import os
@@ -212,6 +212,28 @@ class Nav(unittest.TestCase):
         finally:
             mm.herdr = old
 
+    def test_the_bonsai_follows_the_column_at_the_height_it_was_given(self):
+        moves = []
+        old = mm.herdr
+        mm.herdr = lambda *a, **k: moves.append(a) or {"move_result": {"pane": {"pane_id": "w1:p9", "tab_id": "w1:t1"}}}
+        stacked = {"x": 0, "width": 56}
+        snap = dict(SNAP, panes=SNAP.get("panes", []) + [{"pane_id": "w2:p6", "tab_id": "w2:t1", "label": mm.TREE_TITLE}],
+                    layouts=SNAP["layouts"][:1] + [{"tab_id": "w2:t1", "workspace_id": "w2", "zoomed": False, "panes": [
+                        {"pane_id": "w2:p5", "rect": dict(stacked, y=0, height=45)},
+                        {"pane_id": "w2:p6", "rect": dict(stacked, y=45, height=15)}]}] + SNAP["layouts"][2:])
+        try:
+            self.assertEqual(mm.follow(snap, {"pane_id": "w2:p5", "tab_id": "w2:t1"})["pane_id"], "w1:p9")
+            self.assertEqual(len(moves), 2, "the column, then the bonsai")
+            self.assertEqual(moves[1], ("pane", "move", "w2:p6", "--tab", "w1:t1", "--target-pane", "w1:p9", "--split",
+                                        "down", "--ratio", "0.750", "--no-focus"))
+            moves.clear()
+            mm.follow(SNAP, {"pane_id": "w2:p5", "tab_id": "w2:t1"})
+            self.assertEqual(len(moves), 1, "a bonsai the captain closed stays closed")
+        finally:
+            mm.herdr = old
+        self.assertAlmostEqual(mm.nav_share(snap, "gone", "w2:p6"), 0.7, msg="no column to measure")
+        self.assertAlmostEqual(mm.nav_share(snap, "w1:p1", "w2:p6"), 1 - (bonsai.ROWS + 2) / 60, msg="in another tab")
+
     def test_the_column_splits_off_the_tallest_pane_on_the_right_edge(self):
         layout = SNAP["layouts"][0]
         self.assertEqual(mm.right_edge(layout)["pane_id"], "w1:p4")
@@ -267,6 +289,11 @@ class Bonsai(unittest.TestCase):
         self.assertEqual(len(lines), bonsai.ROWS)
         self.assertTrue(lines[0].startswith("<fa><bb>▀\x1b[0m<fa>▀\x1b[0m<fc>▄\x1b[0m<fd>█\x1b[0m "))
         self.assertEqual(lines[1], " " * bonsai.W)
+        big = bonsai.rows({(0, 0): "a", (1, 1): "b"}, rgb, size=2)
+        self.assertEqual(len(big), 2 * bonsai.ROWS)
+        self.assertEqual(big[0], "<fa>█\x1b[0m" * 2 + " " * (2 * bonsai.W - 2), "a pixel fills two by two")
+        self.assertEqual(big[1], "  " + "<fb>█\x1b[0m" * 2 + " " * (2 * bonsai.W - 4))
+        self.assertEqual(big[2], " " * (2 * bonsai.W))
 
     def test_tokens_count_each_message_once_and_never_shrink(self):
         with tempfile.TemporaryDirectory() as home:
@@ -299,23 +326,28 @@ class Bonsai(unittest.TestCase):
                     else:
                         os.environ[k] = v
 
-    def test_the_bonsai_sits_at_the_foot_only_when_it_fits(self):
-        art = ["tree1", "tree2"]
-        self.assertEqual(mm.screen(["nav"], 6, "hint", art), ["nav", "", "", "tree1", "tree2", "hint"])
-        self.assertEqual(mm.screen(["nav"] * 3, 6, "hint", art), ["nav"] * 3 + ["", "", "hint"], "no gap, no tree")
-        self.assertEqual(mm.screen(["nav"] * 9, 6, "hint", art), ["nav"] * 5 + ["hint"])
+    def test_the_nav_keeps_its_hint_at_the_foot(self):
+        self.assertEqual(mm.screen(["nav"], 4, "hint"), ["nav", "", "", "hint"])
+        self.assertEqual(mm.screen(["nav"] * 9, 4, "hint"), ["nav"] * 3 + ["hint"])
 
-    def test_its_caption_names_the_stage_and_the_tokens(self):
+    def test_the_tree_grows_to_fill_its_pane_over_its_caption(self):
+        tree = bonsai.pixels(bonsai.growth(11.3e9))
         mm.COLOR = True
         try:
-            lines = mm.bonsai_lines(11.3e9, 54)
-            self.assertEqual(len(lines), bonsai.ROWS)
-            self.assertIn("sapling", lines[-2])
-            self.assertIn("11.3B tokens", lines[-1])
-            self.assertEqual(mm.bonsai_lines(11.3e9, bonsai.W + 4), [], "too narrow for the tree and its caption")
+            small = mm.tree_lines(11.3e9, 54, 20)
+            self.assertEqual(len(small), 20)
+            self.assertIn("sapling", small[-1])
+            self.assertIn("11.3B tokens", small[-1])
+            self.assertEqual(small[-1 - bonsai.ROWS:-1], [" " * 10 + l for l in bonsai.rows(tree)])
+            big = mm.tree_lines(11.3e9, 80, 40)
+            self.assertEqual(big[-1 - 2 * bonsai.ROWS:-1], [" " * 6 + l for l in bonsai.rows(tree, size=2)],
+                             "twice the size")
+            self.assertEqual(mm.tree_lines(11.3e9, 54, 3)[:2], ["", ""], "too short for the tree: the caption alone")
+            self.assertEqual(mm.tree_lines(11.3e9, bonsai.W - 1, 40)[-2], "", "too narrow for the tree")
         finally:
             mm.COLOR = False
-        self.assertEqual(mm.bonsai_lines(11.3e9, 54), [], "no color, no pixels")
+        self.assertEqual(mm.tree_lines(11.3e9, 54, 20)[:-1], [""] * 19, "no color, no pixels")
+        self.assertEqual(mm.tree_lines(11.3e9, 54, 0), [])
 
 
 if __name__ == "__main__":

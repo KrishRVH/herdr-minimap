@@ -4,6 +4,7 @@ the first mate, its crew and each crewmate's own agents, fanned out like a chart
 
   minimap.py            the nav column (plugin pane "map"), which follows focus into every tab
   minimap.py --popup    the same nav as a popup (plugin pane "pick"); exits once a choice is made
+  minimap.py --tree     the bonsai under the nav column (plugin pane "tree")
   minimap.py --once     print one frame and exit
   minimap.py --line     one plain line for herdr's tab bar (tools/herdr.toml, ui.tab_bar_right)
   minimap.py --toggle   prefix+m: focus the nav here, or step back out of it; over a zoomed tab, the popup
@@ -13,9 +14,10 @@ the first mate, its crew and each crewmate's own agents, fanned out like a chart
 In the nav: up/down or the wheel picks, enter or a click goes, 1-9 jumps to that space, d opens the deck, f goes to
 the first mate, esc or q steps back. Like herdr's sidebar it stays in view: it moves into whichever tab has focus,
 crew spaces included (only while the captain looks at one, and firstmate's teardown never closes the tab in view),
-and pops up instead over a zoomed tab. Below the nav, where there is room, a pixel bonsai grows with the captain's
-Claude token usage (bonsai.py). It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and Claude's
-transcripts (~/.claude*/projects); it changes only focus, its own pane and the bonsai's token store.
+and pops up instead over a zoomed tab. Under the nav, in a pane of its own that moves with the column and keeps the
+height the captain gives it, a pixel bonsai grows with the captain's Claude token usage (bonsai.py), drawn as large as
+its pane holds. It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and Claude's transcripts
+(~/.claude*/projects); it changes only focus, its own panes and the bonsai's token store.
 Python 3.9, standard library.
 """
 import glob
@@ -43,6 +45,7 @@ AGENTS_SHOWN = 6         # agents listed under a crewmate before "+N more"
 LOG_SHOWN = 4            # events in the deck log
 WIDTH = 56               # the nav column's width in cells
 NAV_TITLE = "⛵ nav"      # the map pane's title in herdr-plugin.toml, which is how a live nav is found
+TREE_TITLE = "🌳 bonsai"  # the tree pane's title there, found the same way
 DECK = "herdr-firstmate-flow"  # Captain's Deck (deimantasnork/captains-deck)
 DECK_SPACE = "⚓ captain's deck"  # the deck's own space
 POLL = 0.2               # seconds between looks at herdr's focus, so the column keeps up with a switch
@@ -514,24 +517,21 @@ def amount(n):
     return str(int(n))
 
 
-def bonsai_lines(count, width):
-    """The bonsai for this many tokens, at the right, with its stage and the count beside its pot; none when the
-    column is too narrow or has no color."""
-    if not COLOR or width < bonsai.W + 14:
-        return []
+def tree_lines(count, width, height):
+    """The bonsai pane's lines: the tree for this many tokens at the largest whole scale the pane holds, centered
+    over its stage and token count at the foot; the caption alone when even the smallest tree does not fit."""
     g = bonsai.growth(count)
-    art, left = bonsai.rows(bonsai.pixels(g)), width - bonsai.W
-    caption = {len(art) - 2: part(bonsai.stage(g), SUBTEXT), len(art) - 1: part(f"{amount(count)} tokens", DIM)}
-    return [(row([caption[i]], left, align="left") if i in caption else " " * left) + line
-            for i, line in enumerate(art)]
+    caption = row([part(bonsai.stage(g), SUBTEXT), part(f" · {amount(count)} tokens", DIM)], width)
+    size = min(width // bonsai.W, (height - 1) // bonsai.ROWS) if COLOR else 0
+    art = [" " * ((width - bonsai.W * size) // 2) + line for line in bonsai.rows(bonsai.pixels(g), size=size)
+           ] if size > 0 else []
+    return ([""] * height + art + [caption])[-height:] if height > 0 else []
 
 
-def screen(lines, height, hint, art=()):
-    """The pane's lines: the nav cut to fit above the hint line, and the bonsai at the foot when it fits below."""
+def screen(lines, height, hint):
+    """The pane's lines: the nav cut to fit above the hint line at the foot."""
     lines = lines[:max(0, height - 1)]
-    room = height - 1 - len(lines)
-    art = list(art) if room > len(art) else []
-    return lines + [""] * (room - len(art)) + art + [hint]
+    return lines + [""] * (height - 1 - len(lines)) + [hint]
 
 
 def hint_line(width, focused):
@@ -616,7 +616,8 @@ def hostable(snap, tab):
 
 
 def follow(snap, mine):
-    """Move the nav column into the focused tab beside its right-edge pane; the column's pane afterwards."""
+    """Move the nav column into the focused tab beside its right-edge pane, the bonsai under it; the column's pane
+    afterwards."""
     tab = snap.get("focused_tab_id")
     if not mine or not tab or mine.get("tab_id") == tab:
         return mine
@@ -626,7 +627,36 @@ def follow(snap, mine):
     target = right_edge(layout)
     moved = herdr("pane", "move", mine["pane_id"], "--tab", tab, "--target-pane", target["pane_id"], "--split",
                   "right", "--ratio", f"{ratio_for(target['rect']['width']):.3f}", "--no-focus")
-    return (moved.get("move_result") or {}).get("pane") or mine
+    new = (moved.get("move_result") or {}).get("pane")
+    if new:
+        carry(snap, mine["pane_id"], new)
+    return new or mine
+
+
+def carry(snap, nav, new):
+    """Move the bonsai under the nav column's new pane, keeping the share of the column it had under the old one
+    (nav) in snap, the look from before the move. A bonsai the captain closed stays closed."""
+    tree = next(iter(trees(snap)), None)
+    if tree:
+        herdr("pane", "move", tree["pane_id"], "--tab", new.get("tab_id") or snap.get("focused_tab_id"),
+              "--target-pane", new["pane_id"], "--split", "down", "--ratio",
+              f"{nav_share(snap, nav, tree['pane_id']):.3f}", "--no-focus")
+
+
+def rect_of(snap, pane):
+    """A pane's rect with its tab id, or None."""
+    return next((dict(p["rect"], tab=l.get("tab_id")) for l in snap.get("layouts", []) for p in l.get("panes", [])
+                 if p.get("pane_id") == pane and p.get("rect")), None)
+
+
+def nav_share(snap, nav, tree):
+    """The share of the column the nav keeps above the bonsai: as the two stand when stacked, else enough to leave
+    the smallest tree its room."""
+    a, b = rect_of(snap, nav), rect_of(snap, tree)
+    if a and b and a["tab"] == b["tab"] and a["x"] == b["x"] and a["y"] < b["y"]:
+        return a["height"] / (a["height"] + b["height"])
+    tall = (a or {}).get("height") or 0
+    return max(0.3, 1 - (bonsai.ROWS + 2) / tall) if tall else 0.7
 
 
 def right_edge(layout):
@@ -666,6 +696,10 @@ def navs(snap):
     return [p for p in snap.get("panes", []) if p.get("label") == NAV_TITLE]
 
 
+def trees(snap):
+    return [p for p in snap.get("panes", []) if p.get("label") == TREE_TITLE]
+
+
 def run_pane(popup=False):
     import termios
     import tty
@@ -679,14 +713,6 @@ def run_pane(popup=False):
     me = next((p.get("terminal_id") for p in first.get("panes", [])
                if p.get("pane_id") == os.environ.get("HERDR_PANE_ID")), None)
     data, fetched, cursor, seen = None, 0.0, None, (None, 0.0)
-    count, art = [bonsai.stored()], {}
-
-    def recount():  # the column keeps the count fresh; a popup only reads it
-        while True:
-            count[0] = bonsai.tokens()
-            time.sleep(RECOUNT)
-    if not popup:
-        threading.Thread(target=recount, daemon=True).start()
 
     def mine_in(snap):
         return next((p for p in snap.get("panes", []) if me and p.get("terminal_id") == me), None)
@@ -697,7 +723,8 @@ def run_pane(popup=False):
             snap = snapshot()
             mine = mine_in(snap)
             focused = bool(mine) and snap.get("focused_pane_id") == mine["pane_id"]
-            if not popup and snap.get("focused_pane_id") and not focused:
+            if not popup and snap.get("focused_pane_id") and not focused and \
+                    snap["focused_pane_id"] not in {t["pane_id"] for t in trees(snap)}:
                 remember("last-pane", snap["focused_pane_id"])
             if data is None or now - fetched >= 2:
                 data, fetched = fleet(snap, now), now
@@ -713,10 +740,7 @@ def run_pane(popup=False):
             width = size.columns - 2  # two cells spare: herdr draws some symbols wider than Python counts them
             hits = []
             lines, items = nav_lines(data, width, frame, cursor, hits)
-            if (count[0], width) not in art:
-                art.clear()
-                art[(count[0], width)] = bonsai_lines(count[0], width)
-            lines = screen(lines, size.lines, hint_line(width, focused or popup), art[(count[0], width)])
+            lines = screen(lines, size.lines, hint_line(width, focused or popup))
             sys.stdout.write("\x1b[H" + "".join(f"{l}\x1b[K\n" for l in lines[:-1]) + lines[-1] + "\x1b[K\x1b[J")
             sys.stdout.flush()
             if not saved:
@@ -761,21 +785,78 @@ def run_pane(popup=False):
             termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
+def run_tree():
+    """The bonsai pane: the tree as large as the pane holds it, redrawn when its size or the token count changes;
+    the count is taken again every RECOUNT seconds."""
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd) if os.isatty(fd) else None
+    if saved:
+        tty.setcbreak(fd)  # keys typed here are dropped, not echoed over the tree
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    sys.stdout.write("\x1b[?25l")
+    count, drawn = [bonsai.stored()], None
+
+    def recount():
+        while True:
+            count[0] = bonsai.tokens()
+            time.sleep(RECOUNT)
+    threading.Thread(target=recount, daemon=True).start()
+    try:
+        while True:
+            size = os.get_terminal_size()
+            if drawn != (count[0], size):
+                drawn = (count[0], size)
+                lines = tree_lines(count[0], size.columns - 2, size.lines)
+                sys.stdout.write("\x1b[H" + "\x1b[K\n".join(lines) + "\x1b[K\x1b[J")
+                sys.stdout.flush()
+            if not saved:
+                time.sleep(1)
+            elif select.select([fd], [], [], 1)[0]:
+                os.read(fd, 256)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write("\x1b[0m\x1b[?25h")
+        if saved:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def fit(pane, edge, along, size):
+    """Resize a pane to size cells of its width or height by moving its inner edge toward edge; herdr resizes a
+    split by a share of the tab."""
+    for layout in snapshot().get("layouts") or []:
+        rect = next((p["rect"] for p in layout.get("panes", []) if p.get("pane_id") == pane), None)
+        whole = (layout.get("area") or {}).get(along)
+        if rect and whole:
+            herdr("pane", "resize", "--pane", pane, "--direction", edge,
+                  "--amount", f"{max(0.0, (rect[along] - size) / whole):.3f}")
+
+
+def open_tree(nav):
+    """Open the bonsai under the nav column, tall enough for the smallest tree and its caption."""
+    before = set(panes())
+    herdr("plugin", "pane", "open", "--plugin", PLUGIN, "--entrypoint", "tree", "--placement", "split",
+          "--direction", "down", "--target-pane", nav, "--no-focus")
+    new = next((p for p in panes() if p not in before), "")
+    if new:
+        fit(new, "down", "height", bonsai.ROWS + 2)
+
+
 def open_nav(snap, layout):
-    """Open the nav column at the right of a tab; its pane id, or '' when herdr refused."""
+    """Open the nav column at the right of a tab with the bonsai under it; its pane id, or '' when herdr refused."""
     target = right_edge(layout)
     before = set(panes(snap))
     herdr("plugin", "pane", "open", "--plugin", PLUGIN, "--entrypoint", "map", "--placement", "split",
           "--direction", "right", "--target-pane", target["pane_id"], "--no-focus")
     new = next((p for p in panes() if p not in before), "")
     if new:
-        area = layout.get("area") or {}
-        rect = next((p["rect"] for tab in (snapshot().get("layouts") or []) for p in tab.get("panes", [])
-                     if p.get("pane_id") == new), None)
-        if rect and area.get("width"):
-            # herdr resizes a split by a share of the tab; move the nav's left edge right until it is WIDTH wide
-            herdr("pane", "resize", "--pane", new, "--direction", "right",
-                  "--amount", f"{max(0.0, (rect['width'] - WIDTH) / area['width']):.3f}")
+        fit(new, "right", "width", WIDTH)
+        if trees(snap):
+            carry(snap, None, {"pane_id": new, "tab_id": layout.get("tab_id")})
+        else:
+            open_tree(new)
     return new
 
 
@@ -832,7 +913,8 @@ def deck():
 
 def ensure(startup=True):
     """Open the nav column if none is open: at startup once herdr has restored its spaces, and after a space or tab
-    closes, which takes the column with it when it was there."""
+    closes, which takes the column with it when it was there. At startup, also open the bonsai under a restored nav
+    without one; a bonsai the captain closes otherwise stays closed until then."""
     for _ in range(30 if startup else 1):
         time.sleep(1)
         snap = snapshot()
@@ -843,9 +925,11 @@ def ensure(startup=True):
     if startup:
         time.sleep(2)  # let restored panes settle, so a restored nav is seen
     snap = snapshot()
-    layout = home_layout(snap)
-    if not navs(snap) and layout:
+    live, layout = navs(snap), home_layout(snap)
+    if not live and layout:
         open_nav(snap, layout)
+    elif live and startup and not trees(snap):
+        open_tree(live[0]["pane_id"])
 
 
 def main(argv):
@@ -856,6 +940,8 @@ def main(argv):
         return deck()
     if "--ensure" in argv:
         return ensure(startup=os.environ.get("HERDR_PLUGIN_EVENT", "startup") == "startup")
+    if "--tree" in argv:
+        return run_tree()
     if "--line" in argv:
         COLOR = False
         print(line_text(fleet()))
