@@ -189,7 +189,7 @@ def fleet(snap=None, now=None):
                      "events": log[-3:]})
     data = {"root": split_label(root and root.get("label"), "👒 first mate")[0],
             "root_pane": (root or {}).get("pane_id"), "root_state": state_of(root, ""), "crew": crew}
-    data.update(places(snap, crew))
+    data.update(places(snap, crew, (root or {}).get("pane_id")))
     return data
 
 
@@ -210,19 +210,54 @@ def space_label(ws, crew):
     return label or f"space {ws.get('number')}"
 
 
-def places(snap, crew):
-    """The spaces and agents the nav lists, in herdr's order."""
+def tree(rows, parent):
+    """Rows in display order, each parent followed by its children; a child gets depth 1 and last (└ or ├)."""
+    keys = [r["key"] for r in rows]
+    kids = {}
+    for r in rows:
+        if parent.get(r["key"]) in keys:
+            kids.setdefault(parent[r["key"]], []).append(r)
+    out = []
+    for r in rows:
+        if parent.get(r["key"]) in keys:
+            continue  # drawn under its parent
+        out.append(dict(r, depth=0, last=False))
+        children = kids.get(r["key"], [])
+        out += [dict(c, depth=1, last=i == len(children) - 1) for i, c in enumerate(children)]
+    return out
+
+
+def places(snap, crew, root_pane=None):
+    """The spaces and agents the nav lists as firstmate's tree: a crew space under the space of the first mate that
+    launched it (a └ space under the nearest owner above it, as firstmate orders them), and each agent in a crew
+    space under the agent of that owner's space."""
     here_ws, here_pane = snap.get("focused_workspace_id"), snap.get("focused_pane_id")
-    numbers = {w.get("workspace_id"): w.get("number") for w in snap.get("workspaces", [])}
-    spaces = [{"id": w.get("workspace_id"), "n": w.get("number"), "label": space_label(w, crew),
-               "state": HERDR_STATE.get(w.get("agent_status"), "idle"), "here": w.get("workspace_id") == here_ws,
-               "crew": crew_space(w, crew), "deck": w.get("label") == DECK_SPACE}
-              for w in snap.get("workspaces", [])]
-    agents = [{"pane": a.get("pane_id"), "name": a.get("display_agent") or a.get("agent") or "agent",
-               "state": HERDR_STATE.get(a.get("agent_status"), "idle"), "doing": a.get("terminal_title_stripped") or "",
-               "n": numbers.get(a.get("workspace_id")), "here": a.get("pane_id") == here_pane}
-              for a in snap.get("agents", [])]
-    return {"spaces": spaces, "agents": agents}
+    workspaces = snap.get("workspaces", [])
+    numbers = {w.get("workspace_id"): w.get("number") for w in workspaces}
+    root_ws = next((p.get("workspace_id") for p in snap.get("panes", []) if p.get("pane_id") == root_pane), None)
+    owner, owner_of = None, {}
+    for w in workspaces:
+        wid = w.get("workspace_id")
+        if not crew_space(w, crew):
+            owner = wid
+        elif any(c.get("space") == wid for c in crew) and root_ws:
+            owner_of[wid] = root_ws  # this home's crew: launched by this first mate
+        elif owner:
+            owner_of[wid] = owner
+    spaces = [{"key": w.get("workspace_id"), "id": w.get("workspace_id"), "n": w.get("number"),
+               "label": space_label(w, crew), "state": HERDR_STATE.get(w.get("agent_status"), "idle"),
+               "here": w.get("workspace_id") == here_ws, "crew": crew_space(w, crew),
+               "deck": w.get("label") == DECK_SPACE} for w in workspaces]
+    raw = snap.get("agents", [])
+    lead = {}  # each space's own agent, the first mate's pane first, that its crew spaces' agents hang under
+    for a in sorted(raw, key=lambda a: a.get("pane_id") != root_pane):
+        lead.setdefault(a.get("workspace_id"), a.get("pane_id"))
+    agents = [{"key": a.get("pane_id"), "pane": a.get("pane_id"), "name": a.get("display_agent") or a.get("agent")
+               or "agent", "state": HERDR_STATE.get(a.get("agent_status"), "idle"),
+               "doing": a.get("terminal_title_stripped") or "", "n": numbers.get(a.get("workspace_id")),
+               "here": a.get("pane_id") == here_pane} for a in raw]
+    agent_parent = {a.get("pane_id"): lead.get(owner_of.get(a.get("workspace_id"))) for a in raw}
+    return {"spaces": tree(spaces, owner_of), "agents": tree(agents, agent_parent)}
 
 
 def events(task):
@@ -436,6 +471,11 @@ def rule(title, width):
     return paint(TEAL, f"─── {title} " + "─" * max(0, width - cells(title) - 5))
 
 
+def branch(r):
+    """The tree connector before a child row: ├ for one with siblings below it, └ for the last."""
+    return part(("└ " if r.get("last") else "├ ") if r.get("depth") else "", TEAL)
+
+
 def nav_lines(data, width, frame=0, cursor=None, hits=None):
     """The nav: spaces, then agents, then the fleet chart. Returns (lines, items): items are the pickable places
     in order, and hits (when given) maps each clickable stretch to one."""
@@ -445,17 +485,16 @@ def nav_lines(data, width, frame=0, cursor=None, hits=None):
         picked = cursor == len(items)
         hits.append((len(lines), 0, width, ("space", s["id"])))
         items.append(("space", s["id"]))
-        tag = "  crew" if s["crew"] else "  deck" if s["deck"] else ""
-        lines.append(row([part("▸ " if picked else "  ", GOLD, bold=True),
+        lines.append(row([part("▸ " if picked else "  ", GOLD, bold=True), branch(s),
                           part(f"{s['n']} ", GOLD if s["here"] else DIM, bold=s["here"]), mark(s["state"], frame),
-                          part(" " + s["label"], TEXT if s["here"] or picked else SUBTEXT, bold=s["here"]),
-                          part(tag, DIM)], width, align="left"))
+                          part(" " + s["label"], TEXT if s["here"] or picked else SUBTEXT, bold=s["here"])],
+                         width, align="left"))
     lines += ["", rule("agents", width)]
     for a in data.get("agents", []):
         picked = cursor == len(items)
         hits.append((len(lines), 0, width, ("agent", a["pane"])))
         items.append(("agent", a["pane"]))
-        lines.append(row([part("▸ " if picked else "  ", GOLD, bold=True), mark(a["state"], frame),
+        lines.append(row([part("▸ " if picked else "  ", GOLD, bold=True), branch(a), mark(a["state"], frame),
                           part(" " + a["name"] + " ", GOLD, bold=a["here"]),
                           part(f"{a['n']} · " if a["n"] else "", DIM), part(a["doing"], SUBTEXT)],
                          width, align="left"))
@@ -620,7 +659,7 @@ def run_pane(popup=False):
             if data is None or now - fetched >= 2:
                 data, fetched = fleet(snap, now), now
             else:
-                data.update(places(snap, data["crew"]))
+                data.update(places(snap, data["crew"], data.get("root_pane")))
             if snap.get("focused_tab_id") != seen[0]:
                 seen = (snap.get("focused_tab_id"), now)
             if not popup and now - seen[1] >= SETTLE:

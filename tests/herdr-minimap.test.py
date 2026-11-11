@@ -145,6 +145,27 @@ class Nav(unittest.TestCase):
                          [(False, False, True), (True, False, False), (False, True, False), (False, False, False)])
         self.assertEqual(mm.space_label({"label": "└ grt · p:xyz", "number": 5}, []), "grt")
 
+    def test_crew_spaces_and_their_agents_hang_under_the_first_mate(self):
+        snap = {"workspaces": [{"workspace_id": "w1", "number": 1, "label": "first mate"},
+                               {"workspace_id": "w3", "number": 2, "label": "⚓ captain's deck"},
+                               {"workspace_id": "w2", "number": 3, "label": "└ ci-tidy · p:a"},
+                               {"workspace_id": "w5", "number": 4, "label": "2ndmate-ops"},
+                               {"workspace_id": "w6", "number": 5, "label": "└ sweep · p:b"},
+                               {"workspace_id": "w7", "number": 6, "label": "└ grt · p:c"}],
+                "panes": [{"pane_id": "w1:p1", "workspace_id": "w1"}],
+                "agents": [{"pane_id": "w6:p1", "workspace_id": "w6"}, {"pane_id": "w2:p2", "workspace_id": "w2"},
+                           {"pane_id": "w1:p1", "workspace_id": "w1"}, {"pane_id": "w5:p1", "workspace_id": "w5"}]}
+        crew = [dict(crewmate("ci-tidy"), space="w2")]
+        out = mm.places(snap, crew, "w1:p1")
+        self.assertEqual([(s["id"], s["depth"], s["last"]) for s in out["spaces"]],
+                         [("w1", 0, False), ("w2", 1, True), ("w3", 0, False), ("w5", 0, False), ("w6", 1, False),
+                          ("w7", 1, True)], "this home's crew under the first mate; other └ spaces under their owner")
+        self.assertEqual({a["pane"]: a["depth"] for a in out["agents"]},
+                         {"w1:p1": 0, "w2:p2": 1, "w5:p1": 0, "w6:p1": 1})
+        order = [a["pane"] for a in out["agents"]]
+        self.assertEqual(order[order.index("w1:p1") + 1], "w2:p2", "Robin's agent right under the first mate's")
+        self.assertEqual(order[order.index("w5:p1") + 1], "w6:p1")
+
     def test_agents_carry_herdr_state_and_their_space_number(self):
         agents = self.data()["agents"]
         self.assertEqual([(a["name"], a["state"], a["n"]) for a in agents],
