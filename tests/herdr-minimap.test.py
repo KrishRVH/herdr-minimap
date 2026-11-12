@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 """tools/herdr-minimap: the nav's fan, the states it shows, which agents count as at work, and the bonsai pane."""
+import contextlib
 import importlib.util
 import json
 import os
@@ -11,6 +12,7 @@ import unittest
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "herdr-minimap"))
 import bonsai  # noqa: E402
+import elder  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("minimap", os.path.join(HERE, "..", "herdr-minimap", "minimap.py"))
 mm = importlib.util.module_from_spec(spec)
@@ -232,7 +234,7 @@ class Nav(unittest.TestCase):
         finally:
             mm.herdr = old
         self.assertAlmostEqual(mm.nav_share(snap, "gone", "w2:p6"), 0.7, msg="no column to measure")
-        self.assertAlmostEqual(mm.nav_share(snap, "w1:p1", "w2:p6"), 1 - (bonsai.ROWS + 2) / 60, msg="in another tab")
+        self.assertAlmostEqual(mm.nav_share(snap, "w1:p1", "w2:p6"), 1 - (bonsai.ROWS + 3) / 60, msg="in another tab")
 
     def test_the_column_splits_off_the_tallest_pane_on_the_right_edge(self):
         layout = SNAP["layouts"][0]
@@ -249,32 +251,62 @@ class Nav(unittest.TestCase):
 
 
 
-def usage(message, day, tokens, request="r"):
-    return json.dumps({"type": "assistant", "requestId": request, "timestamp": f"{day}T12:00:00Z",
+def usage(message, when, tokens, request="r"):
+    """A transcript line for an API message, stamped at noon UTC on a day or at a full UTC stamp."""
+    stamp = when if "T" in when else f"{when}T12:00:00Z"
+    return json.dumps({"type": "assistant", "requestId": request, "timestamp": stamp,
                        "message": {"id": message, "usage": {"input_tokens": tokens, "output_tokens": 0}}}) + "\n"
 
 
-class Bonsai(unittest.TestCase):
-    def tree(self, px):
-        return {p for p, c in px.items() if c in bonsai.BARK or c in bonsai.LEAF or c == bonsai.BLOSSOM}
+@contextlib.contextmanager
+def transcripts_in(home):
+    """Point the token counts at a home of fake transcripts and a store of its own."""
+    folder = os.path.join(home, ".claude", "projects", "p")
+    os.makedirs(os.path.join(folder, "sid", "subagents"))
+    saved = {k: os.environ.get(k) for k in ("HOME", "XDG_STATE_HOME")}
+    os.environ.update(HOME=home, XDG_STATE_HOME=os.path.join(home, "state"))
+    try:
+        yield folder
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
-    def test_it_grows_quickly_while_young_and_tops_out_when_mature(self):
+
+def grown(tree, px):
+    """The pixels of wood, leaf and blossom: the tree without its pot, soil, moss and stones."""
+    colors = set(tree.BARK) | set(tree.LEAF) | ({tree.BLOSSOM} if isinstance(tree.BLOSSOM, str) else set(tree.BLOSSOM))
+    return {p for p, c in px.items() if c in colors}
+
+
+class Bonsai(unittest.TestCase):
+    def test_the_days_tree_grows_quickly_early_and_is_full_grown_by_a_busy_day(self):
         self.assertEqual(bonsai.growth(0), 0)
-        self.assertEqual(bonsai.growth(bonsai.MATURE * 4), 1)
-        steps = [bonsai.growth(t) for t in (1e8, 1e9, 1e10, 1e11)]
+        self.assertEqual(bonsai.growth(bonsai.DAY), 1)
+        steps = [bonsai.growth(t) for t in (1e7, 1e8, 3e8, 6e8)]
         self.assertEqual(steps, sorted(steps))
-        self.assertGreater((steps[1] - steps[0]) / 9e8, (steps[3] - steps[2]) / 9e10, "young, a token grows it most")
-        self.assertEqual(bonsai.stage(bonsai.growth(11.3e9)), "sapling")
+        self.assertGreater((steps[1] - steps[0]) / 9e7, (steps[3] - steps[2]) / 3e8, "early, a token grows it most")
+        self.assertEqual(bonsai.stage(bonsai.growth(232e6)), "first shaping", "a median day")
+
+    def test_the_lifetime_tree_grows_over_years(self):
+        self.assertEqual(elder.growth(0), 0)
+        self.assertEqual(elder.growth(elder.MATURE), 1)
+        self.assertEqual(bonsai.stage(elder.growth(11.5e9)), "young tree")
+        self.assertLess(elder.growth(0.4e9 * 365), 1, "a year at autumn 2026's pace leaves it growing")
 
     def test_more_tokens_make_a_bigger_tree_that_stays_on_the_canvas(self):
-        sizes = []
-        for g in (0, 0.1, 0.3, 0.5, 0.7, 0.9):
-            px = bonsai.pixels(g)
-            self.assertEqual(px, bonsai.pixels(g), "the same tree every time")
-            self.assertTrue(all(0 <= x < bonsai.W and 0 <= y < bonsai.H for x, y in px))
-            sizes.append(len(self.tree(px)))
-        self.assertEqual(sizes, sorted(sizes))
-        self.assertGreater(sizes[-1], sizes[0] * 10)
+        for tree in (bonsai, elder):
+            with self.subTest(tree=tree.__name__):
+                sizes = []
+                for g in (0, 0.1, 0.3, 0.5, 0.7, 0.9, 1):
+                    px = tree.pixels(g)
+                    self.assertEqual(px, tree.pixels(g), "the same tree every time")
+                    self.assertTrue(all(0 <= x < tree.W and 0 <= y < tree.H for x, y in px))
+                    sizes.append(len(grown(tree, px)))
+                self.assertEqual(sizes, sorted(sizes))
+                self.assertGreater(sizes[-1], sizes[0] * 10)
 
     def test_detail_arrives_with_age(self):
         young, old = set(bonsai.pixels(0.6).values()), set(bonsai.pixels(1).values())
@@ -282,6 +314,15 @@ class Bonsai(unittest.TestCase):
         self.assertNotIn(bonsai.DEADWOOD, young)
         self.assertNotIn(bonsai.LEAF[3], set(bonsai.pixels(0.5).values()), "the lit shade comes with age")
         self.assertTrue({bonsai.BLOSSOM, bonsai.DEADWOOD, bonsai.STONE, bonsai.LEAF[3]} <= old)
+        young, old = set(elder.pixels(0.5).values()), set(elder.pixels(1).values())
+        self.assertFalse(young & {*elder.BLOSSOM, *elder.DEADWOOD, elder.LEAF[4], *elder.STONE})
+        self.assertTrue({*elder.BLOSSOM, *elder.DEADWOOD, elder.LEAF[4], elder.STONE[1]} <= old)
+
+    def test_the_lifetime_tree_is_the_broader_more_intricate_one(self):
+        day, life = bonsai.pixels(1), elder.pixels(1)
+        self.assertGreater(len(grown(elder, life)), 1.5 * len(grown(bonsai, day)))
+        self.assertGreater(len(set(life.values())), len(set(day.values())), "more shades")
+        self.assertEqual(elder.ROWS, bonsai.ROWS, "the pane fits either tree at the height it opens with")
 
     def test_half_blocks_stack_two_pixels_to_a_cell(self):
         rgb = lambda c, bg: f"<{'b' if bg else 'f'}{c}>"  # noqa: E731
@@ -294,11 +335,11 @@ class Bonsai(unittest.TestCase):
         self.assertEqual(big[0], "<fa>█\x1b[0m" * 2 + " " * (2 * bonsai.W - 2), "a pixel fills two by two")
         self.assertEqual(big[1], "  " + "<fb>█\x1b[0m" * 2 + " " * (2 * bonsai.W - 4))
         self.assertEqual(big[2], " " * (2 * bonsai.W))
+        self.assertEqual(bonsai.rows({(0, 0): "a", (2, 3): "b"}, rgb, w=3, h=4),
+                         ["<fa>▀\x1b[0m  ", "  <fb>▄\x1b[0m"], "another canvas")
 
     def test_tokens_count_each_message_once_and_never_shrink(self):
-        with tempfile.TemporaryDirectory() as home:
-            folder = os.path.join(home, ".claude", "projects", "p")
-            os.makedirs(os.path.join(folder, "sid", "subagents"))
+        with tempfile.TemporaryDirectory() as home, transcripts_in(home) as folder:
             first = os.path.join(folder, "a.jsonl")
             with open(first, "w") as f:
                 f.write(usage("m1", "2026-11-10", 100) + usage("m1", "2026-11-10", 100) + "not json\n")
@@ -307,47 +348,68 @@ class Bonsai(unittest.TestCase):
             subagent = os.path.join(folder, "sid", "subagents", "agent-x.jsonl")
             with open(subagent, "w") as f:
                 f.write(usage("m3", "2026-11-10", 7))
-            saved = {k: os.environ.get(k) for k in ("HOME", "XDG_STATE_HOME")}
-            os.environ.update(HOME=home, XDG_STATE_HOME=os.path.join(home, "state"))
-            try:
-                self.assertEqual(bonsai.stored(), 0)
-                self.assertEqual(bonsai.tokens(), 112, "a message repeated in a line or a resumed copy counts once")
-                os.remove(first)
-                os.remove(subagent)
-                self.assertEqual(bonsai.tokens(), 112, "transcripts pruned for age leave their day's count")
-                with open(os.path.join(folder, "b.jsonl"), "w") as f:
-                    f.write(usage("m4", "2026-11-11", 30))
-                self.assertEqual(bonsai.tokens(), 142)
-                self.assertEqual(bonsai.stored(), 142)
-            finally:
-                for k, v in saved.items():
-                    if v is None:
-                        os.environ.pop(k, None)
-                    else:
-                        os.environ[k] = v
+            self.assertEqual(bonsai.stored(), 0)
+            self.assertEqual(bonsai.tokens(), 112, "a message repeated in a line or a resumed copy counts once")
+            os.remove(first)
+            os.remove(subagent)
+            self.assertEqual(bonsai.tokens(), 112, "transcripts pruned for age leave their day's count")
+            with open(os.path.join(folder, "b.jsonl"), "w") as f:
+                f.write(usage("m4", "2026-11-11", 30))
+            self.assertEqual(bonsai.tokens(), 142)
+            self.assertEqual(bonsai.stored(), 142)
+
+    def test_the_day_counts_from_local_midnight(self):
+        now = time.time()
+        midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
+        stamp = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))  # noqa: E731
+        with tempfile.TemporaryDirectory() as home, transcripts_in(home) as folder:
+            with open(os.path.join(folder, "a.jsonl"), "w") as f:
+                f.write(usage("m1", stamp(midnight - 60), 50) + usage("m2", stamp(now), 7) +
+                        usage("m2", stamp(now), 7))
+            with open(os.path.join(folder, "b.jsonl"), "w") as f:
+                f.write(usage("m2", stamp(now), 7) + usage("m3", stamp(midnight), 3))
+            old = os.path.join(folder, "old.jsonl")
+            with open(old, "w") as f:
+                f.write(usage("m4", stamp(now), 1000))
+            os.utime(old, (midnight - 3600, midnight - 3600))
+            self.assertEqual(bonsai.today(now), 10, "yesterday's message and a transcript untouched today are left out")
 
     def test_the_nav_keeps_its_hint_at_the_foot(self):
         self.assertEqual(mm.screen(["nav"], 4, "hint"), ["nav", "", "", "hint"])
         self.assertEqual(mm.screen(["nav"] * 9, 4, "hint"), ["nav"] * 3 + ["hint"])
 
     def test_the_tree_grows_to_fill_its_pane_over_its_caption(self):
-        tree = bonsai.pixels(bonsai.growth(11.3e9))
+        tree = bonsai.pixels(bonsai.growth(688e6))
+        life = elder.pixels(elder.growth(11.5e9))
         mm.COLOR = True
         try:
-            small = mm.tree_lines(11.3e9, 54, 20)
+            small = mm.tree_lines(688e6, 54, 20)
             self.assertEqual(len(small), 20)
-            self.assertIn("sapling", small[-1])
-            self.assertIn("11.3B tokens", small[-1])
+            for words in ("mature", "688.0M tokens", "today"):
+                self.assertIn(words, small[-1])
             self.assertEqual(small[-1 - bonsai.ROWS:-1], [" " * 10 + l for l in bonsai.rows(tree)])
-            big = mm.tree_lines(11.3e9, 80, 40)
+            big = mm.tree_lines(688e6, 80, 40)
             self.assertEqual(big[-1 - 2 * bonsai.ROWS:-1], [" " * 6 + l for l in bonsai.rows(tree, size=2)],
                              "twice the size")
-            self.assertEqual(mm.tree_lines(11.3e9, 54, 3)[:2], ["", ""], "too short for the tree: the caption alone")
-            self.assertEqual(mm.tree_lines(11.3e9, bonsai.W - 1, 40)[-2], "", "too narrow for the tree")
+            lifetime = mm.tree_lines(11.5e9, 54, 20, "lifetime")
+            for words in ("young tree", "11.5B tokens", "lifetime"):
+                self.assertIn(words, lifetime[-1])
+            margin = " " * ((54 - elder.W) // 2)
+            self.assertEqual(lifetime[-1 - elder.ROWS:-1],
+                             [margin + l for l in bonsai.rows(life, w=elder.W, h=elder.H)])
+            self.assertEqual(mm.tree_lines(688e6, 54, 3)[:2], ["", ""], "too short for the tree: the caption alone")
+            self.assertEqual(mm.tree_lines(688e6, bonsai.W - 1, 40)[-2], "", "too narrow for the tree")
+            self.assertEqual(mm.tree_lines(11.5e9, elder.W - 1, 40, "lifetime")[-2], "", "too narrow for the elder")
         finally:
             mm.COLOR = False
-        self.assertEqual(mm.tree_lines(11.3e9, 54, 20)[:-1], [""] * 19, "no color, no pixels")
-        self.assertEqual(mm.tree_lines(11.3e9, 54, 0), [])
+        self.assertEqual(mm.tree_lines(688e6, 54, 20)[:-1], [""] * 19, "no color, no pixels")
+        self.assertEqual(mm.tree_lines(688e6, 54, 0), [])
+
+    def test_a_click_or_key_switches_the_tree_and_the_wheel_does_not(self):
+        self.assertEqual(mm.switched("today", [("click", 3, 4)]), "lifetime")
+        self.assertEqual(mm.switched("lifetime", [("char", " ")]), "today")
+        self.assertEqual(mm.switched("today", [("wheel", 1), ("wheel", -1)]), "today")
+        self.assertEqual(mm.switched("today", []), "today")
 
 
 if __name__ == "__main__":

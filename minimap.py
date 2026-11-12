@@ -15,9 +15,11 @@ In the nav: up/down or the wheel picks, enter or a click goes, 1-9 jumps to that
 the first mate, esc or q steps back. Like herdr's sidebar it stays in view: it moves into whichever tab has focus,
 crew spaces included (only while the captain looks at one, and firstmate's teardown never closes the tab in view),
 and pops up instead over a zoomed tab. Under the nav, in a pane of its own that moves with the column and keeps the
-height the captain gives it, a pixel bonsai grows with the captain's Claude token usage (bonsai.py), drawn as large as
-its pane holds. It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and Claude's transcripts
-(~/.claude*/projects); it changes only focus, its own panes and the bonsai's token store.
+height the captain gives it, a pixel bonsai grows with the captain's Claude tokens, drawn as large as its pane holds:
+the day's tree (bonsai.py), sprouting at midnight, or the broader lifetime tree (elder.py); a click or any key in the
+pane switches between them, and the pane keeps the one last shown. It reads herdr's live snapshot, firstmate's
+state/<id>.meta and .status, and Claude's transcripts (~/.claude*/projects); it changes only focus, its own panes, the
+bonsai's token store and the tree last shown.
 Python 3.9, standard library.
 """
 import glob
@@ -34,6 +36,7 @@ import time
 import unicodedata
 
 import bonsai
+import elder
 
 FM_HOME = os.environ.get("FM_HOME") or os.path.expanduser("~/dev")
 HERDR = os.environ.get("HERDR_BIN_PATH") or "herdr"
@@ -49,7 +52,10 @@ TREE_TITLE = "🌳 bonsai"  # the tree pane's title there, found the same way
 DECK = "herdr-firstmate-flow"  # Captain's Deck (deimantasnork/captains-deck)
 DECK_SPACE = "⚓ captain's deck"  # the deck's own space
 POLL = 0.2               # seconds between looks at herdr's focus, so the column keeps up with a switch
-RECOUNT = 600            # seconds between token counts for the bonsai
+TODAY_COUNT = 60         # seconds between counts of the day's tokens
+RECOUNT = 600            # seconds between counts of every token, for the lifetime tree
+VIEWS = {"today": bonsai, "lifetime": elder}  # the bonsai pane's trees, in the order a switch steps through
+TREE_HEIGHT = bonsai.ROWS + 3  # the bonsai pane's least height: either tree, its caption and the pane's two-row frame
 SETTLE = 0.3             # focus the nav did not move rests this long before the column follows: a spawn's brief
                          # flick to a new crew space (fm-spawn restores focus) never carries the column into it
 
@@ -517,15 +523,25 @@ def amount(n):
     return str(int(n))
 
 
-def tree_lines(count, width, height):
-    """The bonsai pane's lines: the tree for this many tokens at the largest whole scale the pane holds, centered
-    over its stage and token count at the foot; the caption alone when even the smallest tree does not fit."""
-    g = bonsai.growth(count)
-    caption = row([part(bonsai.stage(g), SUBTEXT), part(f" · {amount(count)} tokens", DIM)], width)
-    size = min(width // bonsai.W, (height - 1) // bonsai.ROWS) if COLOR else 0
-    art = [" " * ((width - bonsai.W * size) // 2) + line for line in bonsai.rows(bonsai.pixels(g), size=size)
-           ] if size > 0 else []
+def tree_lines(count, width, height, view="today"):
+    """The bonsai pane's lines: the view's tree for this many tokens at the largest whole scale the pane holds,
+    centered over its stage, token count and view at the foot; the caption alone when the tree does not fit."""
+    tree = VIEWS[view]
+    g = tree.growth(count)
+    caption = row([part(bonsai.stage(g), SUBTEXT), part(f" · {amount(count)} tokens ", DIM), part(view, GOLD),
+                   part(" ⇄", DIM)], width)
+    size = min(width // tree.W, (height - 1) // tree.ROWS) if COLOR else 0
+    art = [" " * ((width - tree.W * size) // 2) + line
+           for line in bonsai.rows(tree.pixels(g), size=size, w=tree.W, h=tree.H)] if size > 0 else []
     return ([""] * height + art + [caption])[-height:] if height > 0 else []
+
+
+def switched(view, events):
+    """The view after this input: a click or key steps to the next tree, the wheel leaves it be."""
+    if any(e[0] != "wheel" for e in events):
+        names = list(VIEWS)
+        return names[(names.index(view) + 1) % len(names)]
+    return view
 
 
 def screen(lines, height, hint):
@@ -656,7 +672,7 @@ def nav_share(snap, nav, tree):
     if a and b and a["tab"] == b["tab"] and a["x"] == b["x"] and a["y"] < b["y"]:
         return a["height"] / (a["height"] + b["height"])
     tall = (a or {}).get("height") or 0
-    return max(0.3, 1 - (bonsai.ROWS + 2) / tall) if tall else 0.7
+    return max(0.3, 1 - TREE_HEIGHT / tall) if tall else 0.7
 
 
 def right_edge(layout):
@@ -786,39 +802,47 @@ def run_pane(popup=False):
 
 
 def run_tree():
-    """The bonsai pane: the tree as large as the pane holds it, redrawn when its size or the token count changes;
-    the count is taken again every RECOUNT seconds."""
+    """The bonsai pane: the day's or the lifetime tree as large as the pane holds it, redrawn when its size, view or
+    token count changes; a click or key switches the view. The day's tokens are counted every TODAY_COUNT seconds,
+    every token every RECOUNT."""
     import termios
     import tty
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd) if os.isatty(fd) else None
     if saved:
-        tty.setcbreak(fd)  # keys typed here are dropped, not echoed over the tree
+        tty.setcbreak(fd)  # keys switch the view rather than echo over the tree
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    sys.stdout.write("\x1b[?25l")
-    count, drawn = [bonsai.stored()], None
+    sys.stdout.write("\x1b[?25l\x1b[?1000h\x1b[?1006h")  # hide the cursor; report clicks
+    counts, drawn = {"today": 0, "lifetime": bonsai.stored()}, None
+    view = recall("bonsai-view") if recall("bonsai-view") in VIEWS else "today"
 
     def recount():
+        counted = 0.0
         while True:
-            count[0] = bonsai.tokens()
-            time.sleep(RECOUNT)
+            counts["today"] = bonsai.today()
+            if time.time() - counted >= RECOUNT:
+                counts["lifetime"], counted = bonsai.tokens(), time.time()
+            time.sleep(TODAY_COUNT)
     threading.Thread(target=recount, daemon=True).start()
     try:
         while True:
             size = os.get_terminal_size()
-            if drawn != (count[0], size):
-                drawn = (count[0], size)
-                lines = tree_lines(count[0], size.columns - 2, size.lines)
+            if drawn != (view, counts[view], size):
+                drawn = (view, counts[view], size)
+                lines = tree_lines(counts[view], size.columns - 2, size.lines, view)
                 sys.stdout.write("\x1b[H" + "\x1b[K\n".join(lines) + "\x1b[K\x1b[J")
                 sys.stdout.flush()
             if not saved:
                 time.sleep(1)
             elif select.select([fd], [], [], 1)[0]:
-                os.read(fd, 256)
+                new = switched(view, keys_of(os.read(fd, 256)))
+                if new != view:
+                    view = new
+                    remember("bonsai-view", view)
     except KeyboardInterrupt:
         pass
     finally:
-        sys.stdout.write("\x1b[0m\x1b[?25h")
+        sys.stdout.write("\x1b[?1006l\x1b[?1000l\x1b[0m\x1b[?25h")
         if saved:
             termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
@@ -841,7 +865,7 @@ def open_tree(nav):
           "--direction", "down", "--target-pane", nav, "--no-focus")
     new = next((p for p in panes() if p not in before), "")
     if new:
-        fit(new, "down", "height", bonsai.ROWS + 2)
+        fit(new, "down", "height", TREE_HEIGHT)
 
 
 def open_nav(snap, layout):
