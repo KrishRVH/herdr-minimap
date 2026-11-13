@@ -937,8 +937,9 @@ def deck():
 
 def ensure(startup=True):
     """Open the nav column if none is open: at startup once herdr has restored its spaces, and after a space or tab
-    closes, which takes the column with it when it was there. At startup, also open the bonsai under a restored nav
-    without one; a bonsai the captain closes otherwise stays closed until then."""
+    closes, which takes the column with it when it was there. At startup, also open a fresh bonsai under the nav: herdr
+    restores the old one as a bare shell under its title, so that pane is closed rather than kept; a bonsai the
+    captain closes otherwise stays closed until then."""
     for _ in range(30 if startup else 1):
         time.sleep(1)
         snap = snapshot()
@@ -948,11 +949,13 @@ def ensure(startup=True):
         return
     if startup:
         time.sleep(2)  # let restored panes settle, so a restored nav is seen
+        for tree in trees(snapshot()):
+            herdr("pane", "close", tree["pane_id"])
     snap = snapshot()
     live, layout = navs(snap), home_layout(snap)
     if not live and layout:
         open_nav(snap, layout)
-    elif live and startup and not trees(snap):
+    elif live and startup:
         open_tree(live[0]["pane_id"])
 
 
