@@ -727,7 +727,8 @@ def run_pane(popup=False):
     first = snapshot()
     me = next((p.get("terminal_id") for p in first.get("panes", [])
                if p.get("pane_id") == os.environ.get("HERDR_PANE_ID")), None)
-    data, fetched, cursor, seen = None, 0.0, None, (None, 0.0)
+    data, fetched, cursor, seen, last = None, 0.0, None, (None, 0.0), recall("last-pane")
+    shown, drew = None, 0.0
 
     def mine_in(snap):
         return next((p for p in snap.get("panes", []) if me and p.get("terminal_id") == me), None)
@@ -739,8 +740,10 @@ def run_pane(popup=False):
             mine = mine_in(snap)
             focused = bool(mine) and snap.get("focused_pane_id") == mine["pane_id"]
             if not popup and snap.get("focused_pane_id") and not focused and \
-                    snap["focused_pane_id"] not in {t["pane_id"] for t in trees(snap)}:
-                remember("last-pane", snap["focused_pane_id"])
+                    snap["focused_pane_id"] not in {t["pane_id"] for t in trees(snap)} and \
+                    snap["focused_pane_id"] != last:
+                last = snap["focused_pane_id"]
+                remember("last-pane", last)
             if data is None or now - fetched >= 2:
                 data, fetched = fleet(snap, now), now
             else:
@@ -756,8 +759,13 @@ def run_pane(popup=False):
             hits = []
             lines, items = nav_lines(data, width, frame, cursor, hits)
             lines = screen(lines, size.lines, hint_line(width, focused or popup))
-            sys.stdout.write("\x1b[H" + "".join(f"{l}\x1b[K\n" for l in lines[:-1]) + lines[-1] + "\x1b[K\x1b[J")
-            sys.stdout.flush()
+            out = "\x1b[H" + "".join(f"{l}\x1b[K\n" for l in lines[:-1]) + lines[-1] + "\x1b[K\x1b[J"
+            # herdr repaints whatever is written, so an unchanged frame is not sent, save a full one every few seconds
+            # in case something drew over the pane
+            if out != shown or now - drew >= 5:
+                sys.stdout.write(out)
+                sys.stdout.flush()
+                shown, drew = out, now
             if not saved:
                 time.sleep(POLL)
                 continue
