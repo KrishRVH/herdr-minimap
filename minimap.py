@@ -937,9 +937,10 @@ def deck():
 
 def ensure(startup=True):
     """Open the nav column if none is open: at startup once herdr has restored its spaces, and after a space or tab
-    closes, which takes the column with it when it was there. At startup, also open a fresh bonsai under the nav: herdr
-    restores the old one as a bare shell under its title, so that pane is closed rather than kept; a bonsai the
-    captain closes otherwise stays closed until then."""
+    closes, which takes the column with it when it was there. At startup the column and its bonsai open fresh: herdr
+    restores both as bare shells under their titles, so those panes are closed rather than kept; a bonsai the captain
+    closes otherwise stays closed until then. One run at a time, so a space closed by that cleanup opens one column."""
+    import fcntl
     for _ in range(30 if startup else 1):
         time.sleep(1)
         snap = snapshot()
@@ -947,16 +948,18 @@ def ensure(startup=True):
             break
     else:
         return
-    if startup:
-        time.sleep(2)  # let restored panes settle, so a restored nav is seen
-        for tree in trees(snapshot()):
-            herdr("pane", "close", tree["pane_id"])
-    snap = snapshot()
-    live, layout = navs(snap), home_layout(snap)
-    if not live and layout:
-        open_nav(snap, layout)
-    elif live and startup:
-        open_tree(live[0]["pane_id"])
+    with open(state_path("ensure.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if startup:
+            time.sleep(2)  # let restored panes settle, so every restored shell is seen
+            snap = snapshot()
+            for p in trees(snap) + navs(snap):
+                herdr("pane", "close", p["pane_id"])
+            time.sleep(0.5)  # a space that held only the column closes with it
+        snap = snapshot()
+        layout = home_layout(snap)
+        if not navs(snap) and layout:
+            open_nav(snap, layout)
 
 
 def main(argv):
