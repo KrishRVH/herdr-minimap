@@ -11,6 +11,13 @@ import unittest
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "herdr-minimap"))
+# No case may reach the live herdr: its socket and CLI point nowhere, so a call a case forgot to fake gets nothing.
+for key in [k for k in os.environ if k.startswith("HERDR_")]:
+    os.environ.pop(key, None)
+os.environ["HERDR_SOCKET_PATH"] = os.path.join(tempfile.mkdtemp(prefix="minimap-test."), "no-herdr.sock")
+os.environ["HERDR_BIN_PATH"] = "/usr/bin/false"
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="minimap-test-state.")
+os.environ["HERDR_PLUGIN_STATE_DIR"] = os.path.join(os.environ["XDG_STATE_HOME"], "plugin")
 import bonsai  # noqa: E402
 import elder  # noqa: E402
 
@@ -236,9 +243,36 @@ class Nav(unittest.TestCase):
         self.assertAlmostEqual(mm.nav_share(snap, "gone", "w2:p6"), 0.7, msg="no column to measure")
         self.assertAlmostEqual(mm.nav_share(snap, "w1:p1", "w2:p6"), 1 - (bonsai.ROWS + 3) / 60, msg="in another tab")
 
+    def test_a_bonsai_in_the_columns_own_tab_is_replaced_under_it(self):
+        """herdr will not move a pane within its own tab, so a stray bonsai there is closed and a fresh one opened."""
+        calls, old = [], (mm.herdr, mm.snapshot, mm.open_tree)
+        stray = {"tab_id": "w1:t1", "workspace_id": "w1", "zoomed": False, "panes": [
+            {"pane_id": "w1:p1", "rect": {"x": 0, "y": 0, "width": 64, "height": 22}},
+            {"pane_id": "w1:p9", "rect": {"x": 64, "y": 0, "width": 56, "height": 40}},
+            {"pane_id": "w1:p6", "rect": {"x": 0, "y": 22, "width": 64, "height": 18}}]}
+        snap = {"focused_tab_id": "w1:t1", "layouts": [stray],
+                "panes": [{"pane_id": "w1:p6", "tab_id": "w1:t1", "label": mm.TREE_TITLE}]}
+        mm.herdr = lambda *a, **k: calls.append(a) or {}
+        mm.snapshot = lambda: snap
+        mm.open_tree = lambda nav: calls.append(("open tree under", nav))
+        try:
+            mm.carry(snap, None, {"pane_id": "w1:p9", "tab_id": "w1:t1"})
+            self.assertEqual(calls, [("pane", "close", "w1:p6"), ("open tree under", "w1:p9")])
+            calls.clear()
+            stray["panes"][1]["rect"]["height"] = 22
+            stray["panes"][2]["rect"].update(x=64, width=56)
+            mm.carry(snap, None, {"pane_id": "w1:p9", "tab_id": "w1:t1"})
+            self.assertEqual(calls, [], "already under the column")
+        finally:
+            mm.herdr, mm.snapshot, mm.open_tree = old
+
     def test_the_column_splits_off_the_tallest_pane_on_the_right_edge(self):
         layout = SNAP["layouts"][0]
         self.assertEqual(mm.right_edge(layout)["pane_id"], "w1:p4")
+        self.assertEqual(mm.right_edge(layout, [{"pane_id": "w1:p4"}])["pane_id"], "w1:p3",
+                         "never beside a bonsai left on the right")
+        self.assertEqual(mm.right_edge(layout, [{"pane_id": p["pane_id"]} for p in layout["panes"]])["pane_id"],
+                         "w1:p4", "unless it is all there is")
         self.assertAlmostEqual(mm.ratio_for(200), 1 - mm.WIDTH / 200)
         self.assertEqual(mm.ratio_for(80), 0.5, "a narrow pane keeps at least half")
 

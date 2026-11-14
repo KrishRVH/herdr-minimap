@@ -639,7 +639,7 @@ def follow(snap, mine):
     ok, layout = hostable(snap, tab)
     if not ok:
         return mine
-    target = right_edge(layout)
+    target = right_edge(layout, trees(snap))
     moved = herdr("pane", "move", mine["pane_id"], "--tab", tab, "--target-pane", target["pane_id"], "--split",
                   "right", "--ratio", f"{ratio_for(target['rect']['width']):.3f}", "--no-focus")
     new = (moved.get("move_result") or {}).get("pane")
@@ -649,13 +649,27 @@ def follow(snap, mine):
 
 
 def carry(snap, nav, new):
-    """Move the bonsai under the nav column's new pane, keeping the share of the column it had under the old one
-    (nav) in snap, the look from before the move. A bonsai the captain closed stays closed."""
+    """Put the bonsai under the nav column's new pane, keeping the share of the column it had under the old one
+    (nav) in snap, the look from before the move. A bonsai the captain closed stays closed. herdr moves a pane only
+    into another tab (within its own tab it reports no change), so a bonsai already in the column's tab but not under
+    it is replaced by a fresh one there."""
     tree = next(iter(trees(snap)), None)
-    if tree:
-        herdr("pane", "move", tree["pane_id"], "--tab", new.get("tab_id") or snap.get("focused_tab_id"),
-              "--target-pane", new["pane_id"], "--split", "down", "--ratio",
-              f"{nav_share(snap, nav, tree['pane_id']):.3f}", "--no-focus")
+    if not tree:
+        return
+    tab = new.get("tab_id") or snap.get("focused_tab_id")
+    if tree.get("tab_id") != tab:
+        herdr("pane", "move", tree["pane_id"], "--tab", tab, "--target-pane", new["pane_id"], "--split", "down",
+              "--ratio", f"{nav_share(snap, nav, tree['pane_id']):.3f}", "--no-focus")
+    elif not stacked(snapshot(), new["pane_id"], tree["pane_id"]):
+        herdr("pane", "close", tree["pane_id"])
+        open_tree(new["pane_id"])
+
+
+def stacked(snap, nav, tree):
+    """Whether the bonsai sits directly under the nav, the column's full width."""
+    a, b = rect_of(snap, nav), rect_of(snap, tree)
+    return bool(a and b and a["tab"] == b["tab"] and a["x"] == b["x"] and a["width"] == b["width"]
+                and a["y"] + a["height"] == b["y"])
 
 
 def rect_of(snap, pane):
@@ -674,10 +688,12 @@ def nav_share(snap, nav, tree):
     return max(0.3, 1 - TREE_HEIGHT / tall) if tall else 0.7
 
 
-def right_edge(layout):
-    """The pane to split from: the one on the tab's right edge, tallest, then topmost."""
-    return max(layout["panes"], key=lambda p: (p["rect"]["x"] + p["rect"]["width"], p["rect"]["height"],
-                                               -p["rect"]["y"]))
+def right_edge(layout, skip=()):
+    """The pane to split from: the one on the tab's right edge, tallest, then topmost, passing over the panes in
+    skip (a bonsai, which the column would otherwise open beside) unless they are all there is."""
+    ids = {p["pane_id"] for p in skip}
+    panes = [p for p in layout["panes"] if p["pane_id"] not in ids] or layout["panes"]
+    return max(panes, key=lambda p: (p["rect"]["x"] + p["rect"]["width"], p["rect"]["height"], -p["rect"]["y"]))
 
 
 def ratio_for(width):
@@ -875,7 +891,7 @@ def open_tree(nav):
 
 def open_nav(snap, layout):
     """Open the nav column at the right of a tab with the bonsai under it; its pane id, or '' when herdr refused."""
-    target = right_edge(layout)
+    target = right_edge(layout, trees(snap))
     before = set(panes(snap))
     herdr("plugin", "pane", "open", "--plugin", PLUGIN, "--entrypoint", "map", "--placement", "split",
           "--direction", "right", "--target-pane", target["pane_id"], "--no-focus")
