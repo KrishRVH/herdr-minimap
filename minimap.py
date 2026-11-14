@@ -52,8 +52,7 @@ TREE_TITLE = "🌳 bonsai"  # the tree pane's title there, found the same way
 DECK = "herdr-firstmate-flow"  # Captain's Deck (deimantasnork/captains-deck)
 DECK_SPACE = "⚓ captain's deck"  # the deck's own space
 POLL = 0.2               # seconds between looks at herdr's focus, so the column keeps up with a switch
-TODAY_COUNT = 60         # seconds between counts of the day's tokens
-RECOUNT = 600            # seconds between counts of every token, for the lifetime tree
+COUNT_EVERY = 60         # seconds between token counts, each reading only what the transcripts gained since
 VIEWS = {"today": bonsai, "lifetime": elder}  # the bonsai pane's trees, in the order a switch steps through
 TREE_HEIGHT = bonsai.ROWS + 3  # the bonsai pane's least height: either tree, its caption and the pane's two-row frame
 SETTLE = 0.3             # focus the nav did not move rests this long before the column follows: a spawn's brief
@@ -803,8 +802,7 @@ def run_pane(popup=False):
 
 def run_tree():
     """The bonsai pane: the day's or the lifetime tree as large as the pane holds it, redrawn when its size, view or
-    token count changes; a click or key switches the view. The day's tokens are counted every TODAY_COUNT seconds,
-    every token every RECOUNT."""
+    token count changes; a click or key switches the view. Tokens are counted every COUNT_EVERY seconds."""
     import termios
     import tty
     fd = sys.stdin.fileno()
@@ -817,12 +815,11 @@ def run_tree():
     view = recall("bonsai-view") if recall("bonsai-view") in VIEWS else "today"
 
     def recount():
-        counted = 0.0
+        ledger = bonsai.Ledger()  # the first update reads every transcript; later ones only what was appended
         while True:
-            counts["today"] = bonsai.today()
-            if time.time() - counted >= RECOUNT:
-                counts["lifetime"], counted = bonsai.tokens(), time.time()
-            time.sleep(TODAY_COUNT)
+            ledger.update()
+            counts["today"], counts["lifetime"] = bonsai.today(ledger=ledger), bonsai.tokens(ledger)
+            time.sleep(COUNT_EVERY)
     threading.Thread(target=recount, daemon=True).start()
     try:
         while True:

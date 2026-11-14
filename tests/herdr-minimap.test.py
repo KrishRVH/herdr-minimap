@@ -368,11 +368,26 @@ class Bonsai(unittest.TestCase):
                         usage("m2", stamp(now), 7))
             with open(os.path.join(folder, "b.jsonl"), "w") as f:
                 f.write(usage("m2", stamp(now), 7) + usage("m3", stamp(midnight), 3))
-            old = os.path.join(folder, "old.jsonl")
-            with open(old, "w") as f:
-                f.write(usage("m4", stamp(now), 1000))
-            os.utime(old, (midnight - 3600, midnight - 3600))
-            self.assertEqual(bonsai.today(now), 10, "yesterday's message and a transcript untouched today are left out")
+            self.assertEqual(bonsai.today(now), 10, "yesterday's message is left out")
+
+    def test_a_ledger_reads_only_what_was_appended(self):
+        with tempfile.TemporaryDirectory() as home, transcripts_in(home) as folder:
+            path = os.path.join(folder, "a.jsonl")
+            with open(path, "w") as f:
+                f.write(usage("m1", "2026-11-10", 100) + usage("m2", "2026-11-10", 5)[:20])  # m2 still being written
+            ledger = bonsai.Ledger().update()
+            self.assertEqual(ledger.days(), {"2026-11-10": 100}, "a half-written line waits")
+            with open(path, "a") as f:
+                f.write(usage("m2", "2026-11-10", 5)[20:] + usage("m1", "2026-11-10", 100))
+            self.assertEqual(ledger.update().days(), {"2026-11-10": 105}, "the rest of the line, and m1 again once")
+            read = ledger.read[path][1]
+            self.assertEqual(read, os.path.getsize(path))
+            os.remove(path)
+            with open(path, "w") as f:
+                f.write(usage("m3", "2026-11-11", 7))
+            self.assertEqual(ledger.update().days(), {"2026-11-10": 105, "2026-11-11": 7},
+                             "a replaced transcript is read again; the pruned one keeps its count")
+            self.assertEqual(bonsai.tokens(ledger), 112)
 
     def test_the_nav_keeps_its_hint_at_the_foot(self):
         self.assertEqual(mm.screen(["nav"], 4, "hint"), ["nav", "", "", "hint"])
