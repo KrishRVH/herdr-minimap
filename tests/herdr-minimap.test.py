@@ -439,14 +439,18 @@ class Ladder(unittest.TestCase):
     def test_each_view_lands_on_its_own_stage(self):
         day = lambda tokens: art.stage(bonsai.day_growth(tokens))  # noqa: E731
         landed = [day(100e6), day(232e6), art.stage(bonsai.life_growth(13e9)), day(1e9)]
-        self.assertEqual(landed, ["first branches", "thickening trunk", "shaped", "established"])
+        self.assertEqual(landed, ["first branches", "thickening trunk", "shaped", "refined"])
         self.assertEqual(len(set(landed)), 4, "100M day, median day, 13B lifetime and 1B day: four stages")
         self.assertGreaterEqual(art.index(bonsai.life_growth(13e9)), art.index(art.START["shaped"]), "13B is shaped")
 
-    def test_the_day_is_a_younger_tree_than_the_lifetime(self):
+    def test_the_day_tree_keeps_growing_through_every_stage(self):
         self.assertEqual(bonsai.day_growth(0), 0)
-        self.assertAlmostEqual(bonsai.day_growth(bonsai.DAY), 0.65)
-        self.assertAlmostEqual(bonsai.day_growth(50 * bonsai.DAY), 0.65, msg="a day tops out at 0.65")
+        seen = {art.stage(bonsai.day_growth(1e4 * 1.05 ** k)) for k in range(259)}  # 10K up to 3B
+        self.assertEqual(seen, {name for _, name in art.STAGES}, "a day reaches every stage by 3B tokens")
+        self.assertEqual(art.stage(bonsai.day_growth(2.7e9)), "venerable")
+        heavy = [bonsai.day_growth(t) for t in (1e9, 1.5e9, 2e9, 2.5e9)]
+        self.assertEqual(heavy, sorted(set(heavy)), "a heavier day is always an older tree")
+        self.assertNotEqual(art.stage(bonsai.day_growth(1e9)), art.stage(bonsai.life_growth(60e9)))
         steps = [bonsai.day_growth(t) for t in (1e7, 1e8, 3e8, 6e8)]
         self.assertEqual(steps, sorted(steps))
         self.assertGreater((steps[1] - steps[0]) / 9e7, (steps[3] - steps[2]) / 3e8, "early, a token grows it most")
@@ -454,7 +458,6 @@ class Ladder(unittest.TestCase):
         self.assertEqual(bonsai.life_growth(bonsai.MATURE), 1)
         self.assertEqual(bonsai.life_growth(50 * bonsai.MATURE), 1)
         self.assertLess(bonsai.life_growth(0.4e9 * 365), 1, "a year at autumn 2026's pace leaves it growing")
-        self.assertGreater(bonsai.life_growth(bonsai.MATURE), bonsai.day_growth(50 * bonsai.DAY), "old ages: lifetime")
         self.assertEqual(list(bonsai.VIEWS), ["today", "lifetime"])
 
     def test_the_pane_scale_is_as_large_as_fits_in_eighths_and_capped(self):
