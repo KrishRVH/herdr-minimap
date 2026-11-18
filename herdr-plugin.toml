@@ -32,7 +32,7 @@ placement = "split"
 command = ["/usr/bin/env", "python3", "minimap.py"]
 
 # the bonsai under the nav column, which moves with it and keeps the height the captain gives it; a click or key
-# switches it between the day's tree and the lifetime tree
+# switches it between the day's tree and the lifetime tree, and v, tab or the arrows between its varieties
 [[panes]]
 id = "tree"
 title = "🌳 bonsai"

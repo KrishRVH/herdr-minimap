@@ -15,11 +15,14 @@ In the nav: up/down or the wheel picks, enter or a click goes, 1-9 jumps to that
 the first mate, esc or q steps back. Like herdr's sidebar it stays in view: it moves into whichever tab has focus,
 crew spaces included (only while the captain looks at one, and firstmate's teardown never closes the tab in view),
 and pops up instead over a zoomed tab. Under the nav, in a pane of its own that moves with the column and keeps the
-height the captain gives it, a pixel bonsai grows with the captain's Claude tokens, drawn as large as its pane holds:
-the day's tree (bonsai.py), sprouting at midnight, or the broader lifetime tree (elder.py); a click or any key in the
-pane switches between them, and the pane keeps the one last shown. It reads herdr's live snapshot, firstmate's
-state/<id>.meta and .status, and Claude's transcripts (~/.claude*/projects); it changes only focus, its own panes, the
-deck's space and its own state (the bonsai's token store, the tree last shown, the pane to step back to).
+height the captain gives it, a pixel bonsai grows with the captain's Claude tokens through twenty named stages, drawn
+as large as its pane holds (art.py): a sakura, a maple or a Japanese black pine (sakura.py, maple.py, pine.py), each
+keeping its own lifetime growth (bonsai.py). The day's tree sprouts at midnight; the lifetime tree is the same variety
+at the age its own tokens have grown it to. A click on the variety in the caption, v, tab or the arrows switch
+variety; any other click or key switches between today and lifetime; the pane keeps the variety and view last shown.
+It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and Claude's transcripts
+(~/.claude*/projects); it changes only focus, its own panes, the deck's space and its own state (the bonsai's token
+store and garden, the view last shown, the pane to step back to).
 Python 3.9, standard library.
 """
 import fcntl
@@ -38,8 +41,8 @@ import time
 import tty
 import unicodedata
 
+import art
 import bonsai
-import elder
 
 FM_HOME = os.environ.get("FM_HOME") or os.path.expanduser("~/dev")
 HERDR = os.environ.get("HERDR_BIN_PATH") or "herdr"
@@ -56,8 +59,8 @@ DECK = "herdr-firstmate-flow"  # Captain's Deck (deimantasnork/captains-deck)
 DECK_SPACE = "⚓ captain's deck"  # the deck's own space
 POLL = 0.2               # seconds between looks at herdr's focus, so the column keeps up with a switch
 COUNT_EVERY = 60         # seconds between token counts, each reading only what the transcripts gained since
-VIEWS = {"today": bonsai, "lifetime": elder}  # the bonsai pane's trees, in the order a switch steps through
-TREE_HEIGHT = bonsai.ROWS + 3  # the bonsai pane's least height: either tree, its caption and the pane's two-row frame
+VIEWS = bonsai.VIEWS      # the bonsai pane's views, in the order a switch steps through
+TREE_HEIGHT = bonsai.ROWS + 3  # the bonsai pane's least height: the tree at scale 1, its caption and the pane's frame
 SETTLE = 0.3             # focus the nav did not move rests this long before the column follows: a spawn's brief
                          # flick to a new crew space (fm-spawn restores focus) never carries the column into it
 
@@ -527,25 +530,44 @@ def amount(n):
     return str(int(n))
 
 
-def tree_lines(count, width, height, view="today"):
-    """The bonsai pane's lines: the view's tree for this many tokens at the largest whole scale the pane holds,
-    centered over its stage, token count and view at the foot; the caption alone when the tree does not fit."""
-    tree = VIEWS[view]
-    g = tree.growth(count)
-    caption = row([part(bonsai.stage(g), SUBTEXT), part(f" · {amount(count)} tokens ", DIM), part(view, GOLD),
-                   part(" ⇄", DIM)], width)
-    size = min(width // tree.W, (height - 1) // tree.ROWS) if COLOR else 0
-    art = [" " * ((width - tree.W * size) // 2) + line
-           for line in bonsai.rows(tree.pixels(g), size=size, w=tree.W, h=tree.H)] if size > 0 else []
-    return ([""] * height + art + [caption])[-height:] if height > 0 else []
+def tree_lines(count, width, height, view="today", variety="sakura", hits=None):
+    """The bonsai pane's lines: the variety's tree at the view's age for this many tokens, at the largest scale the
+    pane holds (art.fit), centered over its caption: variety, stage, amount and view. The caption alone when the tree
+    does not fit. hits, when given, takes the caption's variety span as (line, x0, x1, ("variety",)) like nav_lines."""
+    tree = bonsai.VARIETIES[variety]
+    g = bonsai.VIEWS[view](count)
+    name = f"{tree.ICON} {tree.NAME}"
+    for word in (" tokens", ""):  # the word goes first when the caption is too wide
+        caption = [part(name, TEXT), part(" · ", DIM), part(art.stage(g), SUBTEXT),
+                   part(f" · {amount(count)}{word} · ", DIM), part(view, GOLD), part(" ⇄", DIM)]
+        if sum(cells(p[0]) for p in caption) <= width:
+            break
+    if hits is not None and height > 0:
+        left = (width - min(width, sum(cells(p[0]) for p in caption))) // 2
+        hits.append((height - 1, left, min(width, left + cells(name)), ("variety",)))
+    scale = art.fit(width, height) if COLOR else 0
+    if scale:
+        w, h = art.size(scale)
+        picture = [" " * ((width - w) // 2) + line for line in bonsai.rows(tree.pixels(g, scale), w=w, h=h)]
+    else:
+        picture = []
+    return ([""] * height + picture + [row(caption, width)])[-height:] if height > 0 else []
 
 
-def switched(view, events):
-    """The view after this input: a click or key steps to the next tree, the wheel leaves it be."""
-    if any(e[0] != "wheel" for e in events):
-        names = list(VIEWS)
-        return names[(names.index(view) + 1) % len(names)]
-    return view
+def switched(view, variety, events, hits=()):
+    """The (view, variety) after this input: a click on the caption's variety, v, tab or the right arrow steps to the
+    next variety and the left arrow to the previous; any other click or key switches between today and lifetime; the
+    wheel does nothing."""
+    names, views = list(bonsai.VARIETIES), list(VIEWS)
+    for e in events:
+        if e[0] == "wheel":
+            continue
+        if e[0] in ("left", "right") or (e[0] == "char" and e[1] in ("v", "V", "\t")) or \
+                (e[0] == "click" and hit_at(hits, e[1], e[2])):
+            variety = names[(names.index(variety) + (-1 if e[0] == "left" else 1)) % len(names)]
+        else:
+            view = views[(views.index(view) + 1) % len(views)]
+    return view, variety
 
 
 def screen(lines, height, hint):
@@ -580,11 +602,13 @@ def line_text(data):
 
 CSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z~]")
 MOUSE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
-ARROWS = {b"\x1b[A": "up", b"\x1b[B": "down", b"\x1bOA": "up", b"\x1bOB": "down"}
+ARROWS = {b"\x1b[A": "up", b"\x1b[B": "down", b"\x1b[C": "right", b"\x1b[D": "left",
+          b"\x1bOA": "up", b"\x1bOB": "down", b"\x1bOC": "right", b"\x1bOD": "left"}
 
 
 def keys_of(data):
-    """Terminal input as events: (up,) (down,) (enter,) (esc,) (char, c), (click, x, y) zero-based, (wheel, ±1)."""
+    """Terminal input as events: (up,) (down,) (left,) (right,) (enter,) (esc,) (char, c), (click, x, y) zero-based,
+    (wheel, ±1)."""
     out, i = [], 0
     while i < len(data):
         m = MOUSE.match(data, i)
@@ -828,15 +852,16 @@ def run_pane(popup=False):
 
 
 def run_tree():
-    """The bonsai pane: the day's or the lifetime tree as large as the pane holds it, redrawn when its size, view or
-    token count changes; a click or key switches the view. Tokens are counted every COUNT_EVERY seconds."""
+    """The bonsai pane: the selected variety's day or lifetime tree as large as the pane holds it, redrawn when its
+    size, variety, view or token count changes; clicks and keys switch variety and view. Tokens are counted every
+    COUNT_EVERY seconds, and the garden hands the ones counted to the variety selected then."""
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd) if os.isatty(fd) else None
     if saved:
         tty.setcbreak(fd)  # keys switch the view rather than echo over the tree
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     sys.stdout.write("\x1b[?25l\x1b[?1000h\x1b[?1006h")  # hide the cursor; report clicks
-    counts, drawn = {"today": 0, "lifetime": bonsai.stored()}, None
+    state, hits, drawn, garden_lock = {"today": 0, "garden": bonsai.garden()}, [], None, threading.Lock()
     view = recall("bonsai-view")
     if view not in VIEWS:
         view = "today"
@@ -845,24 +870,33 @@ def run_tree():
         ledger = bonsai.Ledger()  # the first update reads every transcript; later ones only what was appended
         while True:
             ledger.update()
-            counts["today"], counts["lifetime"] = bonsai.today(ledger=ledger), bonsai.tokens(ledger)
+            state["today"] = bonsai.today(ledger=ledger)
+            total = bonsai.tokens(ledger)
+            with garden_lock:  # so a switch and a recount reach the file and this pane in the same order
+                state["garden"] = bonsai.accrue(total)
             time.sleep(COUNT_EVERY)
     threading.Thread(target=recount, daemon=True).start()
     try:
         while True:
-            size = os.get_terminal_size()
-            if drawn != (view, counts[view], size):
-                drawn = (view, counts[view], size)
-                lines = tree_lines(counts[view], size.columns - 2, size.lines, view)
+            size, garden = os.get_terminal_size(), state["garden"]
+            variety = garden["variety"]
+            count = state["today"] if view == "today" else garden["grown"][variety]
+            if drawn != (view, variety, count, size):
+                drawn = (view, variety, count, size)
+                hits.clear()
+                lines = tree_lines(count, size.columns - 2, size.lines, view, variety, hits)
                 sys.stdout.write("\x1b[H" + "\x1b[K\n".join(lines) + "\x1b[K\x1b[J")
                 sys.stdout.flush()
             if not saved:
                 time.sleep(1)
             elif select.select([fd], [], [], 1)[0]:
-                new = switched(view, keys_of(os.read(fd, 256)))
-                if new != view:
-                    view = new
+                new_view, new_variety = switched(view, variety, keys_of(os.read(fd, 256)), hits)
+                if new_view != view:
+                    view = new_view
                     remember("bonsai-view", view)
+                if new_variety != variety:
+                    with garden_lock:
+                        state["garden"] = bonsai.choose(new_variety)
     except KeyboardInterrupt:
         pass
     finally:
