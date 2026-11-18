@@ -19,9 +19,10 @@ height the captain gives it, a pixel bonsai grows with the captain's Claude toke
 the day's tree (bonsai.py), sprouting at midnight, or the broader lifetime tree (elder.py); a click or any key in the
 pane switches between them, and the pane keeps the one last shown. It reads herdr's live snapshot, firstmate's
 state/<id>.meta and .status, and Claude's transcripts (~/.claude*/projects); it changes only focus, its own panes, the
-bonsai's token store and the tree last shown.
+deck's space and its own state (the bonsai's token store, the tree last shown, the pane to step back to).
 Python 3.9, standard library.
 """
+import fcntl
 import glob
 import json
 import os
@@ -31,8 +32,10 @@ import signal
 import socket
 import subprocess
 import sys
+import termios
 import threading
 import time
+import tty
 import unicodedata
 
 import bonsai
@@ -65,16 +68,17 @@ SPIN = "◐◓◑◒"
 SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
 
-def herdr(*args, timeout=5):
+def herdr(*args):
     try:
-        out = subprocess.run([HERDR, *args], capture_output=True, text=True, timeout=timeout)
+        out = subprocess.run([HERDR, *args], capture_output=True, text=True, timeout=5)
         return json.loads(out.stdout).get("result") or {}
     except (OSError, ValueError, subprocess.SubprocessError):
         return {}
 
 
 def api(method, **params):
-    """One request over herdr's socket (newline-delimited JSON), for calls its CLI lacks; {} on any failure."""
+    """One request over herdr's socket (newline-delimited JSON): quicker than a CLI run, and the only way to the calls
+    the CLI lacks; {} on any failure."""
     path = os.environ.get("HERDR_SOCKET_PATH") or os.path.expanduser("~/.config/herdr/herdr.sock")
     try:
         with socket.socket(socket.AF_UNIX) as conn:
@@ -98,7 +102,7 @@ def snapshot():
 
 
 def focus_pane(pane):
-    return bool(api("pane.focus", pane_id=pane))
+    api("pane.focus", pane_id=pane)
 
 
 def panes(snap=None):
@@ -109,22 +113,28 @@ def panes(snap=None):
 def meta(path):
     out = {}
     try:
-        for line in open(path, encoding="utf-8"):
-            key, sep, value = line.rstrip("\n").partition("=")
-            if sep:
-                out[key] = value
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                key, sep, value = line.rstrip("\n").partition("=")
+                if sep:
+                    out[key] = value
     except OSError:
         pass
     return out
 
 
+def status_lines(task):
+    """A task's status log, one event a line; [] when it has none."""
+    try:
+        with open(os.path.join(FM_HOME, "state", task + ".status"), encoding="utf-8") as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+
+
 def task_wait(task):
     """'decision' while the task's last event asks the first mate or the captain, else its last state word."""
-    try:
-        lines = open(os.path.join(FM_HOME, "state", task + ".status"), encoding="utf-8").read().splitlines()
-    except OSError:
-        return ""
-    for line in reversed(lines):
+    for line in reversed(status_lines(task)):
         word = re.match(r"\s*([a-z-]+)", line)
         if not word or word[1] in ("note", "working"):
             continue
@@ -143,7 +153,8 @@ def subagents(session, now):
         transcript = spec[:-len(".meta.json")] + ".jsonl"
         try:
             age = now - os.path.getmtime(transcript if os.path.exists(transcript) else spec)
-            info = json.load(open(spec, encoding="utf-8"))
+            with open(spec, encoding="utf-8") as f:
+                info = json.load(f)
         except (OSError, ValueError):
             continue
         if age > RECENT_SECONDS:
@@ -157,13 +168,13 @@ def subagents(session, now):
 
 def roster_name(task):
     """The Straw Hat tools/herdr-names.sh gave this task, for a crewmate whose pane is gone."""
-    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    names = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "herdr-names.sh")
+    roster = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "qd", "crew-roster")
     try:
-        crew = re.findall(r'"([^"]+)"', re.search(r"CREW=\((.*?)\)", open(os.path.join(here, "herdr-names.sh"),
-                                                                       encoding="utf-8").read(), re.S)[1])
-        roster = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "qd",
-                              "crew-roster")
-        n = next(int(line.split()[1]) for line in open(roster, encoding="utf-8") if line.split()[:1] == [task])
+        with open(names, encoding="utf-8") as f:
+            crew = re.findall(r'"([^"]+)"', re.search(r"CREW=\((.*?)\)", f.read(), re.S)[1])
+        with open(roster, encoding="utf-8") as f:
+            n = next(int(line.split()[1]) for line in f if line.split()[:1] == [task])
         return crew[n % len(crew)]
     except (OSError, TypeError, IndexError, ValueError, StopIteration):
         return "⚓ crew"
@@ -175,10 +186,10 @@ def root_of(live):
         (p for p in live.values() if (p.get("cwd") or "").rstrip("/").endswith("/firstmate")), None)
 
 
-def split_label(label, fallback):
-    """'🌸 Robin: ci-tidy' -> ('🌸 Robin', 'ci-tidy')."""
-    name, sep, rest = (label or "").partition(": ")
-    return (name, rest) if sep else (label or fallback, "")
+def label_name(label, fallback):
+    """'🌸 Robin: ci-tidy' -> '🌸 Robin'; a label without a task stands whole."""
+    name, sep, _ = (label or "").partition(": ")
+    return name if sep else label or fallback
 
 
 def fleet(snap=None, now=None):
@@ -194,12 +205,12 @@ def fleet(snap=None, now=None):
         m = meta(path)
         if "secondmate" in m.get("kind", ""):
             continue
-        pane = live.get(m.get("herdr_pane_id") or "") or live.get((m.get("window") or "").split(":", 1)[-1])
-        name = split_label(pane["label"], "")[0] if pane and pane.get("label") else roster_name(task)
+        pane = live.get(m.get("herdr_pane_id"))
+        name = label_name(pane["label"], "") if pane and pane.get("label") else roster_name(task)
         session = ((pane or {}).get("agent_session") or {}).get("value")
         spawned = re.match(r"s(\d+)", m.get("spawn_gen") or "")
         log = events(task)
-        crew.append({"task": task, "name": name, "kind": m.get("kind") or "ship", "pane": (pane or {}).get("pane_id"),
+        crew.append({"task": task, "name": name, "pane": (pane or {}).get("pane_id"),
                      "space": m.get("herdr_workspace_id") or (pane or {}).get("workspace_id"),
                      "state": state_of(pane, task_wait(task)), "agents": subagents(session, now),
                      "project": os.path.basename(m.get("project") or ""), "model": m.get("model") or "",
@@ -207,7 +218,7 @@ def fleet(snap=None, now=None):
                      "prs": list(dict.fromkeys(pr for _, _, text in reversed(log)
                                                for pr in re.findall(r"#\d+", text)))[:2],
                      "events": log[-3:]})
-    data = {"root": split_label(root and root.get("label"), "👒 first mate")[0],
+    data = {"root": label_name(root and root.get("label"), "👒 first mate"),
             "root_pane": (root or {}).get("pane_id"), "root_state": state_of(root, ""), "crew": crew}
     data.update(places(snap, crew, (root or {}).get("pane_id")))
     return data
@@ -266,8 +277,7 @@ def places(snap, crew, root_pane=None):
             owner_of[wid] = owner
     spaces = [{"key": w.get("workspace_id"), "id": w.get("workspace_id"), "n": w.get("number"),
                "label": space_label(w, crew), "state": HERDR_STATE.get(w.get("agent_status"), "idle"),
-               "here": w.get("workspace_id") == here_ws, "crew": crew_space(w, crew),
-               "deck": w.get("label") == DECK_SPACE} for w in workspaces]
+               "here": w.get("workspace_id") == here_ws} for w in workspaces]
     raw = snap.get("agents", [])
     lead = {}  # each space's own agent, the first mate's pane first, that its crew spaces' agents hang under
     for a in sorted(raw, key=lambda a: a.get("pane_id") != root_pane):
@@ -282,12 +292,8 @@ def places(snap, crew, root_pane=None):
 
 def events(task):
     """A task's status log as (epoch, word, short text), oldest first; PR links shortened to #N."""
-    try:
-        lines = open(os.path.join(FM_HOME, "state", task + ".status"), encoding="utf-8").read().splitlines()
-    except OSError:
-        return []
     out = []
-    for line in lines[-12:]:
+    for line in status_lines(task)[-12:]:
         m = re.match(r"\s*([a-z-]+)((?:\s*\[[^\]]*\])*)\s*:\s*(.*)", line)
         if not m:
             continue
@@ -406,9 +412,9 @@ def column(c, width, frame):
 def fan(n, width):
     """The bar from the root's stem down to each column's center (╭──┬──┴──╮), or None for a single column."""
     centers = [i * width // n + width // n // 2 for i in range(n)]
-    stem = stem_at(centers)
     if n == 1:
         return centers, None
+    stem = stem_at(centers)
     line = [" "] * width
     for x in range(centers[0], centers[-1] + 1):
         line[x] = "─"
@@ -431,8 +437,7 @@ def frame_lines(data, width, frame=0, hits=None, top=0):
     hands = sum(1 for c in crew for a in c["agents"] if a[1])
     waiting = sum(1 for c in crew if c["state"] == "decision")
     n = max(1, min(len(crew), width // 14))  # columns narrower than 14 cells stop being readable
-    first = min(len(crew), n) or 1
-    stem = stem_at([i * width // first + width // first // 2 for i in range(first)])
+    stem = stem_at(fan(n, width)[0])  # over the first row of columns
     lines = [row([part(data["root"], GOLD, bold=True), part(" "), mark(data["root_state"], frame)], width, stem),
              row([part("first mate", DIM)], width, stem),
              row([part(f"{len(crew)} crew · {hands} agents at work", DIM)]
@@ -464,7 +469,7 @@ def frame_lines(data, width, frame=0, hits=None, top=0):
     log = sorted(((at, c["name"], word, text) for c in crew for at, word, text in c["events"] if at),
                  reverse=True)[:LOG_SHOWN]
     if log:
-        lines.append(paint(TEAL, "─── deck log " + "─" * (width - 13)))
+        lines.append(rule("deck log", width))
         for at, name, word, text in log:
             stamp = time.strftime("%H:%M" if time.time() - at < 43200 else "%b %d", time.localtime(at))
             lines.append(row([part(stamp + " ", DIM), part(name.split(" ")[0] + " ", GOLD),
@@ -732,8 +737,6 @@ def trees(snap):
 
 
 def run_pane(popup=False):
-    import termios
-    import tty
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd) if os.isatty(fd) else None
     if saved:
@@ -827,8 +830,6 @@ def run_pane(popup=False):
 def run_tree():
     """The bonsai pane: the day's or the lifetime tree as large as the pane holds it, redrawn when its size, view or
     token count changes; a click or key switches the view. Tokens are counted every COUNT_EVERY seconds."""
-    import termios
-    import tty
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd) if os.isatty(fd) else None
     if saved:
@@ -836,7 +837,9 @@ def run_tree():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     sys.stdout.write("\x1b[?25l\x1b[?1000h\x1b[?1006h")  # hide the cursor; report clicks
     counts, drawn = {"today": 0, "lifetime": bonsai.stored()}, None
-    view = recall("bonsai-view") if recall("bonsai-view") in VIEWS else "today"
+    view = recall("bonsai-view")
+    if view not in VIEWS:
+        view = "today"
 
     def recount():
         ledger = bonsai.Ledger()  # the first update reads every transcript; later ones only what was appended
@@ -956,12 +959,11 @@ def deck():
         herdr("pane", "move", new, "--new-workspace", "--label", DECK_SPACE, "--focus")
 
 
-def ensure(startup=True):
+def ensure(startup):
     """Open the nav column if none is open: at startup once herdr has restored its spaces, and after a space or tab
     closes, which takes the column with it when it was there. At startup the column and its bonsai open fresh: herdr
     restores both as bare shells under their titles, so those panes are closed rather than kept; a bonsai the captain
     closes otherwise stays closed until then. One run at a time, so a space closed by that cleanup opens one column."""
-    import fcntl
     for _ in range(30 if startup else 1):
         time.sleep(1)
         snap = snapshot()

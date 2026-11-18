@@ -173,7 +173,7 @@ def pixels(g):
                 wood[(x, y + 1)] = BARK[0]                             # thicker toward the trunk
         tip = path[-1]
         pads.append((tip[0] + b["side"], tip[1] - 1, 1.2 + (b["pad"] - 1.2) * ramp(g, b["born"] + 0.04, 0.3)))
-        for n, s in enumerate(b["subs"]):
+        for s in b["subs"]:
             grown = round(s["length"] * ramp(g, s["born"], 0.12))
             if grown < 1 or len(path) < 3:
                 continue

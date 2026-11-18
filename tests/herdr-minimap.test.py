@@ -4,6 +4,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -28,8 +29,8 @@ mm.COLOR = False
 
 
 def crewmate(task, state="working", agents=(), name="🌸 Robin"):
-    return {"task": task, "name": name, "kind": "ship", "state": state, "agents": list(agents), "project": "webapp",
-            "model": "opus", "effort": "high", "age": 600, "prs": ["#1234"],
+    return {"task": task, "name": name, "state": state, "agents": list(agents), "project": "webapp", "model": "opus",
+            "effort": "high", "age": 600, "prs": ["#1234"],
             "events": [(1794412758, "paused", "both PRs green")]}
 
 
@@ -71,7 +72,8 @@ class Chart(unittest.TestCase):
         self.assertIn("calm seas", " ".join(self.draw()))
 
     def test_lines_fit_the_width(self):
-        long = crewmate("a-very-long-task-name-that-will-not-fit", agents=[("a description far too long " * 3, True, 2)])
+        long = crewmate("a-very-long-task-name-that-will-not-fit",
+                        agents=[("a description far too long " * 3, True, 2)])
         for width in (30, 40, 64, 90):
             for line in self.draw(long, crewmate("b"), crewmate("c"), crewmate("d"), width=width):
                 self.assertLessEqual(mm.cells(line), width, line)
@@ -91,12 +93,11 @@ class States(unittest.TestCase):
             path = os.path.join(home, "state", "t.status")
             old, mm.FM_HOME = mm.FM_HOME, home
             try:
-                open(path, "w").write("working: setup\nneeds-decision [key=k]: which\nnote: x\n")
-                self.assertEqual(mm.task_wait("t"), "decision")
-                open(path, "a").write("resolved [key=k]: answered\n")
-                self.assertEqual(mm.task_wait("t"), "")
-                open(path, "a").write("paused: waiting on checks\n")
-                self.assertEqual(mm.task_wait("t"), "paused")
+                for line, want in (("working: setup\nneeds-decision [key=k]: which\nnote: x", "decision"),
+                                   ("resolved [key=k]: answered", ""), ("paused: waiting on checks", "paused")):
+                    with open(path, "a") as f:
+                        f.write(line + "\n")
+                    self.assertEqual(mm.task_wait("t"), want, line)
             finally:
                 mm.FM_HOME = old
 
@@ -114,7 +115,8 @@ class Agents(unittest.TestCase):
             os.makedirs(folder)
             now = time.time()
             for name, age in (("busy", 10), ("finished", 300), ("stale", 5000)):
-                json.dump({"description": name, "spawnDepth": 1}, open(os.path.join(folder, f"agent-{name}.meta.json"), "w"))
+                with open(os.path.join(folder, f"agent-{name}.meta.json"), "w") as f:
+                    json.dump({"description": name, "spawnDepth": 1}, f)
                 transcript = os.path.join(folder, f"agent-{name}.jsonl")
                 open(transcript, "w").close()
                 os.utime(transcript, (now - age, now - age))
@@ -151,11 +153,11 @@ class Nav(unittest.TestCase):
         data.update(mm.places(SNAP, crew))
         return data
 
-    def test_spaces_name_the_crewmate_and_mark_crew_and_deck_spaces(self):
+    def test_spaces_name_the_crewmate_and_mark_the_one_in_view(self):
         spaces = self.data()["spaces"]
-        self.assertEqual([s["label"] for s in spaces], ["first mate", "🌸 Robin · ci-tidy", "⚓ captain's deck", "notes"])
-        self.assertEqual([(s["crew"], s["deck"], s["here"]) for s in spaces],
-                         [(False, False, True), (True, False, False), (False, True, False), (False, False, False)])
+        self.assertEqual([s["label"] for s in spaces],
+                         ["first mate", "🌸 Robin · ci-tidy", "⚓ captain's deck", "notes"])
+        self.assertEqual([s["here"] for s in spaces], [True, False, False, False])
         self.assertEqual(mm.space_label({"label": "└ grt · p:xyz", "number": 5}, []), "grt")
 
     def test_crew_spaces_and_their_agents_hang_under_the_first_mate(self):
@@ -200,7 +202,8 @@ class Nav(unittest.TestCase):
         self.assertIsNone(mm.hit_at(hits, 5, 0), "the section rule is not a place")
 
     def test_the_column_goes_into_every_tab_but_a_zoomed_one(self):
-        snap = dict(SNAP, layouts=[dict(l, panes=l["panes"] or [{"pane_id": "x", "rect": {}}]) for l in SNAP["layouts"]])
+        snap = dict(SNAP, layouts=[dict(l, panes=l["panes"] or [{"pane_id": "x", "rect": {}}])
+                                   for l in SNAP["layouts"]])
         for tab in ("w1:t1", "w2:t1", "w3:t1"):
             self.assertTrue(mm.hostable(snap, tab)[0], tab)
         self.assertFalse(mm.hostable(snap, "w4:t1")[0], "zoomed")
@@ -226,7 +229,7 @@ class Nav(unittest.TestCase):
         old = mm.herdr
         mm.herdr = lambda *a, **k: moves.append(a) or {"move_result": {"pane": {"pane_id": "w1:p9", "tab_id": "w1:t1"}}}
         stacked = {"x": 0, "width": 56}
-        snap = dict(SNAP, panes=SNAP.get("panes", []) + [{"pane_id": "w2:p6", "tab_id": "w2:t1", "label": mm.TREE_TITLE}],
+        snap = dict(SNAP, panes=[{"pane_id": "w2:p6", "tab_id": "w2:t1", "label": mm.TREE_TITLE}],
                     layouts=SNAP["layouts"][:1] + [{"tab_id": "w2:t1", "workspace_id": "w2", "zoomed": False, "panes": [
                         {"pane_id": "w2:p5", "rect": dict(stacked, y=0, height=45)},
                         {"pane_id": "w2:p6", "rect": dict(stacked, y=45, height=15)}]}] + SNAP["layouts"][2:])
@@ -282,7 +285,6 @@ class Nav(unittest.TestCase):
         self.assertEqual(mm.keys_of(b"\x1b[<64;1;1M\x1b[<65;1;1M"), [("wheel", -1), ("wheel", 1)])
         self.assertEqual(mm.keys_of(b"\x1b[I2"), [("char", "2")], "a focus report is skipped")
         self.assertEqual(mm.keys_of("é".encode()), [], "a wider character is no key, not an empty q")
-
 
 
 def usage(message, when, tokens, request="r"):
@@ -459,6 +461,34 @@ class Bonsai(unittest.TestCase):
         self.assertEqual(mm.switched("lifetime", [("char", " ")]), "today")
         self.assertEqual(mm.switched("today", [("wheel", 1), ("wheel", -1)]), "today")
         self.assertEqual(mm.switched("today", []), "today")
+
+
+class Names(unittest.TestCase):
+    """tools/herdr-names.sh, whose labels the nav reads to find the first mate."""
+
+    def label(self, where):
+        """The label herdr-names.sh gives a session started in where under a fake home, whose shells export FM_HOME as
+        every shell here does, or None when it leaves the pane alone."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.realpath(tmp)
+            os.makedirs(os.path.join(home, where))
+            with open(os.path.join(home, "herdr"), "w") as f:
+                f.write(f'#!/bin/sh\n[ "$2" = rename ] && printf %s "$4" > {home}/label\nexit 0\n')
+            os.chmod(os.path.join(home, "herdr"), 0o755)
+            env = {"PATH": home + os.pathsep + os.environ["PATH"], "HOME": home, "HERDR_PANE_ID": "w1:p1",
+                   "FM_HOME": os.path.join(home, "dev")}
+            subprocess.run(["bash", os.path.join(HERE, "..", "herdr-names.sh")], input="{}", env=env,
+                           cwd=os.path.join(home, where), text=True, check=True, timeout=10)
+            try:
+                with open(os.path.join(home, "label"), encoding="utf-8") as f:
+                    return f.read()
+            except FileNotFoundError:
+                return None
+
+    def test_only_the_session_in_the_firstmate_checkout_is_the_first_mate(self):
+        self.assertEqual(self.label("dev/firstmate"), "👒 Luffy: first mate")
+        self.assertIsNone(self.label("dev"), "a hand session in the home keeps its own name")
+        self.assertIsNone(self.label("dev/projects/webapp"))
 
 
 if __name__ == "__main__":
