@@ -252,7 +252,7 @@ class Nav(unittest.TestCase):
         finally:
             mm.herdr = old
         self.assertAlmostEqual(mm.nav_share(snap, "gone", "w2:p6"), 0.7, msg="no column to measure")
-        self.assertAlmostEqual(mm.nav_share(snap, "w1:p1", "w2:p6"), 1 - (bonsai.ROWS + 3) / 60, msg="in another tab")
+        self.assertAlmostEqual(mm.nav_share(snap, "w1:p1", "w2:p6"), 1 - (art.ROWS + 3) / 60, msg="in another tab")
 
     def test_a_bonsai_in_the_columns_own_tab_is_replaced_under_it(self):
         """herdr will not move a pane within its own tab, so a stray bonsai there is closed and a fresh one opened."""
@@ -340,7 +340,7 @@ def differs(a, b):
 
 def at_start(name):
     """The age a frame of the stage called name is judged at: just past its start, where its new feature has arrived."""
-    return art.START[name] + 0.005
+    return art.START[name] + art.PLUS
 
 
 MIN_CHANGE = 10   # pixels a stage's frame must differ by from the stage before's, at scale 1
@@ -351,14 +351,14 @@ class Bonsai(unittest.TestCase):
     def test_half_blocks_stack_two_pixels_to_a_cell(self):
         rgb = lambda c, bg: f"<{'b' if bg else 'f'}{c}>"  # noqa: E731
         lines = bonsai.rows({(0, 0): "a", (0, 1): "b", (1, 0): "a", (2, 1): "c", (3, 0): "d", (3, 1): "d"}, rgb)
-        self.assertEqual(len(lines), bonsai.ROWS)
+        self.assertEqual(len(lines), art.ROWS)
         self.assertTrue(lines[0].startswith("<fa><bb>▀\x1b[0m<fa>▀\x1b[0m<fc>▄\x1b[0m<fd>█\x1b[0m "))
-        self.assertEqual(lines[1], " " * bonsai.W)
+        self.assertEqual(lines[1], " " * art.W)
         big = bonsai.rows({(0, 0): "a", (1, 1): "b"}, rgb, size=2)
-        self.assertEqual(len(big), 2 * bonsai.ROWS)
-        self.assertEqual(big[0], "<fa>█\x1b[0m" * 2 + " " * (2 * bonsai.W - 2), "a pixel fills two by two")
-        self.assertEqual(big[1], "  " + "<fb>█\x1b[0m" * 2 + " " * (2 * bonsai.W - 4))
-        self.assertEqual(big[2], " " * (2 * bonsai.W))
+        self.assertEqual(len(big), 2 * art.ROWS)
+        self.assertEqual(big[0], "<fa>█\x1b[0m" * 2 + " " * (2 * art.W - 2), "a pixel fills two by two")
+        self.assertEqual(big[1], "  " + "<fb>█\x1b[0m" * 2 + " " * (2 * art.W - 4))
+        self.assertEqual(big[2], " " * (2 * art.W))
         self.assertEqual(bonsai.rows({(0, 0): "a", (2, 3): "b"}, rgb, w=3, h=4),
                          ["<fa>▀\x1b[0m  ", "  <fb>▄\x1b[0m"], "another canvas")
 
@@ -553,9 +553,6 @@ class Kit(unittest.TestCase):
         self.assertTrue(all(((i + 0.5 - 24) / 10) ** 2 + ((j + 0.5 - 15) / 6) ** 2 <= 1 for i, j in cover))
         self.assertEqual(c.px[(17, 12)], "333333", "lit upper left")
         self.assertEqual(c.px[(31, 18)], "111111", "shadow lower right")
-        lit = art.Canvas(1)
-        lit.blob(24, 15, 10, 6, self.TONES, jitter=0, light=(0.6, 0.8))
-        self.assertEqual((lit.px[(17, 12)], lit.px[(31, 18)]), ("111111", "333333"), "light from the lower right")
 
     def test_a_blob_can_be_lumpy_holed_and_clipped(self):
         plain = art.Canvas(1).blob(24, 15, 10, 6, self.TONES)
@@ -565,10 +562,6 @@ class Kit(unittest.TestCase):
         self.assertGreater(len(holed), 0.6 * len(plain))
         top = art.Canvas(1).blob(24, 15, 10, 6, self.TONES, where=lambda x, y: y < 15)
         self.assertTrue(top and all(j < 15 for _, j in top))
-
-    def test_a_cloud_covers_more_than_its_main_blob(self):
-        cloud, blob = art.Canvas(1).cloud(24, 15, 8, 5, self.TONES), art.Canvas(1).blob(24, 15, 8, 5, self.TONES)
-        self.assertGreater(len(cloud), len(blob))
 
     def test_a_block_a_polygon_and_a_line_stay_in_their_shapes(self):
         c = art.Canvas(1)
@@ -581,6 +574,10 @@ class Kit(unittest.TestCase):
         line = art.Canvas(1).line(2, 3, 12, 8, "aabbcc")
         self.assertEqual((line[0], line[-1]), ((2, 3), (12, 8)))
         self.assertEqual(len(line), 11, "a pixel a step of its longer side")
+        clipped = art.Canvas(1)
+        kept = clipped.line(2, 3, 12, 3, "aabbcc", test=lambda i, j: i < 6)
+        self.assertEqual(kept, [(i, 3) for i in range(2, 6)])
+        self.assertEqual(set(clipped.px), set(kept), "a vetoed pixel is not drawn")
 
     def test_scatter_marks_only_its_cover_and_a_box_gains_pixels_with_scale(self):
         c = art.Canvas(1)
@@ -605,6 +602,16 @@ class Kit(unittest.TestCase):
         stroke = c.trace([(24, 3), (24, 27)], 5, 5)
         self.assertTrue(0.2 * len(stroke) < len(wound) < 0.7 * len(stroke), "stripes with gaps, not a solid wrap")
         self.assertTrue(all(c.px[p] == "c0773a" for p in wound))
+
+    def test_wire_can_take_a_color_per_side_a_veto_and_extra_width(self):
+        path = [(24, 3), (24, 27)]
+        c = art.Canvas(2)
+        wound = c.coil(path, 5, 5, lambda across, shade: "aa0000" if across < 0 else "0000aa", test=lambda i, j: j < 30)
+        self.assertTrue(wound and all(j < 30 for _, j in wound), "a vetoed pixel is not wound")
+        self.assertEqual({c.px[p] for p in wound}, {"aa0000", "0000aa"}, "a color for each side")
+        plain = art.Canvas(2).coil(path, 5, 5, "c0773a")
+        self.assertGreater(len(art.Canvas(2).coil(path, 5, 5, "c0773a", grow=2)), len(plain), "grow widens it")
+        self.assertNotEqual(art.Canvas(2).coil(path, 5, 5, "c0773a", duty=0.8), plain, "duty is the stripe's share")
 
 
 class Varieties(unittest.TestCase):

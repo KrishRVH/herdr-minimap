@@ -60,7 +60,7 @@ DECK_SPACE = "⚓ captain's deck"  # the deck's own space
 POLL = 0.2               # seconds between looks at herdr's focus, so the column keeps up with a switch
 COUNT_EVERY = 60         # seconds between token counts, each reading only what the transcripts gained since
 VIEWS = bonsai.VIEWS      # the bonsai pane's views, in the order a switch steps through
-TREE_HEIGHT = bonsai.ROWS + 3  # the bonsai pane's least height: the tree at scale 1, its caption and the pane's frame
+TREE_HEIGHT = art.ROWS + 3  # the bonsai pane's least height: the tree at scale 1, its caption and the pane's frame
 SETTLE = 0.3             # focus the nav did not move rests this long before the column follows: a spawn's brief
                          # flick to a new crew space (fm-spawn restores focus) never carries the column into it
 
@@ -530,7 +530,7 @@ def amount(n):
     return str(int(n))
 
 
-def tree_lines(count, width, height, view="today", variety="sakura", hits=None):
+def tree_lines(count, width, height, view="today", variety=bonsai.DEFAULT, hits=None):
     """The bonsai pane's lines: the variety's tree at the view's age for this many tokens, at the largest scale the
     pane holds (art.fit), centered over its caption: variety, stage, amount and view. The caption alone when the tree
     does not fit. hits, when given, takes the caption's variety span as (line, x0, x1, ("variety",)) like nav_lines."""
@@ -540,10 +540,11 @@ def tree_lines(count, width, height, view="today", variety="sakura", hits=None):
     for word in (" tokens", ""):  # the word goes first when the caption is too wide
         caption = [part(name, TEXT), part(" · ", DIM), part(art.stage(g), SUBTEXT),
                    part(f" · {amount(count)}{word} · ", DIM), part(view, GOLD), part(" ⇄", DIM)]
-        if sum(cells(p[0]) for p in caption) <= width:
+        span = sum(cells(p[0]) for p in caption)
+        if span <= width:
             break
     if hits is not None and height > 0:
-        left = (width - min(width, sum(cells(p[0]) for p in caption))) // 2
+        left = (width - min(width, span)) // 2
         hits.append((height - 1, left, min(width, left + cells(name)), ("variety",)))
     scale = art.fit(width, height) if COLOR else 0
     if scale:
