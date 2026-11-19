@@ -17,8 +17,9 @@ crew spaces included (only while the captain looks at one, and firstmate's teard
 and pops up instead over a zoomed tab. Under the nav, in a pane of its own that moves with the column and keeps the
 height the captain gives it, a pixel bonsai grows with the captain's Claude tokens through twenty named stages, drawn
 as large as its pane holds (art.py): a sakura, a maple or a Japanese black pine (sakura.py, maple.py, pine.py), each
-keeping its own lifetime growth (bonsai.py). The day's tree sprouts at midnight; the lifetime tree is the same variety
-at the age its own tokens have grown it to. A click on the variety in the caption, v, tab or the arrows switch
+keeping its own day and lifetime growth (bonsai.py). The day's tree sprouts at midnight and grows with the tokens
+counted while that variety is selected; the lifetime tree is the same variety at the age its own tokens have grown it
+to. A click on the variety in the caption, v, tab or the arrows switch
 variety; any other click or key switches between today and lifetime; the pane keeps the variety and view last shown.
 It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and Claude's transcripts
 (~/.claude*/projects); it changes only focus, its own panes, the deck's space and its own state (the bonsai's token
@@ -855,14 +856,15 @@ def run_pane(popup=False):
 def run_tree():
     """The bonsai pane: the selected variety's day or lifetime tree as large as the pane holds it, redrawn when its
     size, variety, view or token count changes; clicks and keys switch variety and view. Tokens are counted every
-    COUNT_EVERY seconds, and the garden hands the ones counted to the variety selected then."""
+    COUNT_EVERY seconds, and the garden hands the ones counted to the variety selected then, for its day and lifetime
+    trees alike."""
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd) if os.isatty(fd) else None
     if saved:
         tty.setcbreak(fd)  # keys switch the view rather than echo over the tree
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     sys.stdout.write("\x1b[?25l\x1b[?1000h\x1b[?1006h")  # hide the cursor; report clicks
-    state, hits, drawn, garden_lock = {"today": 0, "garden": bonsai.garden()}, [], None, threading.Lock()
+    state, hits, drawn, garden_lock = {"garden": bonsai.garden()}, [], None, threading.Lock()
     view = recall("bonsai-view")
     if view not in VIEWS:
         view = "today"
@@ -871,17 +873,16 @@ def run_tree():
         ledger = bonsai.Ledger()  # the first update reads every transcript; later ones only what was appended
         while True:
             ledger.update()
-            state["today"] = bonsai.today(ledger=ledger)
-            total = bonsai.tokens(ledger)
+            today, total = bonsai.today(ledger=ledger), bonsai.tokens(ledger)
             with garden_lock:  # so a switch and a recount reach the file and this pane in the same order
-                state["garden"] = bonsai.accrue(total)
+                state["garden"] = bonsai.accrue(total, today)
             time.sleep(COUNT_EVERY)
     threading.Thread(target=recount, daemon=True).start()
     try:
         while True:
             size, garden = os.get_terminal_size(), state["garden"]
             variety = garden["variety"]
-            count = state["today"] if view == "today" else garden["grown"][variety]
+            count = bonsai.day_count(garden, variety) if view == "today" else garden["grown"][variety]
             if drawn != (view, variety, count, size):
                 drawn = (view, variety, count, size)
                 hits.clear()

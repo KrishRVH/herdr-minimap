@@ -697,7 +697,8 @@ class Garden(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, state_in(folder):
             self.written({"2026-11-10": 12_000_000_000, "2026-11-11": 1_000_000_000})
             self.assertEqual(bonsai.garden(), {"variety": "sakura", "counted": 13_000_000_000,
-                                               "grown": {"sakura": 13_000_000_000, "maple": 0, "black pine": 0}})
+                                               "grown": {"sakura": 13_000_000_000, "maple": 0, "black pine": 0},
+                                               "day": bonsai.no_day()})
             self.assertEqual(bonsai.accrue(14_000_000_000)["grown"]["sakura"], 14_000_000_000)
 
     def test_accrue_gives_the_selected_variety_only_what_is_new(self):
@@ -739,7 +740,8 @@ class Garden(unittest.TestCase):
             fresh = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30,
                                    cwd=os.path.join(HERE, ".."), env=dict(os.environ))
             self.assertEqual(json.loads(fresh.stdout), {"variety": "black pine", "counted": 160,
-                                                        "grown": {"sakura": 100, "maple": 0, "black pine": 60}})
+                                                        "grown": {"sakura": 100, "maple": 0, "black pine": 60},
+                                                        "day": bonsai.no_day()})
 
     def test_an_accrual_waits_for_the_garden_lock(self):
         with tempfile.TemporaryDirectory() as folder, state_in(folder):
@@ -755,6 +757,52 @@ class Garden(unittest.TestCase):
             worker.join(10)
             self.assertFalse(worker.is_alive())
             self.assertEqual(bonsai.garden()["grown"]["sakura"], 130)
+
+    def test_the_day_tree_grows_only_while_its_variety_is_selected(self):
+        noon = time.mktime((2026, 11, 19, 12, 0, 0, 0, 0, -1))
+        with tempfile.TemporaryDirectory() as folder, state_in(folder):
+            self.written({"2026-11-10": 100})
+            bonsai.choose("maple")
+            first = bonsai.accrue(150, 40, noon)
+            self.assertEqual(first["day"]["grown"], {"sakura": 0, "maple": 40, "black pine": 0},
+                             "a new day gives the selected variety all of today so far")
+            bonsai.choose("black pine")
+            after = bonsai.accrue(180, 70, noon + 60)
+            self.assertEqual(after["day"]["grown"], {"sakura": 0, "maple": 40, "black pine": 30})
+            self.assertEqual(after["grown"], {"sakura": 100, "maple": 50, "black pine": 30})
+            self.assertEqual(bonsai.accrue(180, 60, noon + 120)["day"]["grown"]["black pine"], 30,
+                             "a smaller day count hands nothing out")
+            self.assertEqual([bonsai.day_count(after, n, noon) for n in ("sakura", "maple", "black pine")],
+                             [0, 40, 30], "each view of today shows only that variety's share")
+
+    def test_the_day_tree_starts_afresh_at_local_midnight(self):
+        late = time.mktime((2026, 11, 19, 23, 59, 0, 0, 0, -1))
+        with tempfile.TemporaryDirectory() as folder, state_in(folder):
+            self.written({"2026-11-10": 100})
+            bonsai.choose("maple")
+            yesterday = bonsai.accrue(200, 90, late)
+            self.assertEqual(bonsai.day_count(yesterday, "maple", late + 120), 0,
+                             "yesterday's record shows nothing once the date has turned")
+            today = bonsai.accrue(230, 5, late + 120)
+            self.assertEqual(today["day"], {"date": bonsai.local_date(late + 120), "counted": 5,
+                                            "grown": {"sakura": 0, "maple": 5, "black pine": 0}})
+            self.assertEqual(today["grown"]["maple"], 130, "the lifetime tree keeps every token")
+
+    def test_a_garden_from_before_day_records_keeps_its_lifetime_growth(self):
+        with tempfile.TemporaryDirectory() as folder, state_in(folder):
+            os.makedirs(os.path.dirname(bonsai.garden_path()))
+            with open(bonsai.garden_path(), "w") as f:
+                json.dump({"variety": "maple", "counted": 90, "grown": {"sakura": 60, "maple": 30}}, f)
+            old = bonsai.garden()
+            self.assertEqual((old["grown"]["maple"], old["day"]), (30, bonsai.no_day()))
+            self.assertEqual(bonsai.accrue(100, 12)["day"]["grown"], {"sakura": 0, "maple": 12, "black pine": 0})
+            with open(bonsai.garden_path()) as f:
+                data = json.load(f)
+            data["day"] = {"date": 7}
+            with open(bonsai.garden_path(), "w") as f:
+                json.dump(data, f)
+            damaged = bonsai.garden()
+            self.assertEqual((damaged["grown"]["maple"], damaged["day"]), (40, bonsai.no_day()))
 
     def test_a_damaged_or_unwritable_store_does_not_stop_the_pane(self):
         with tempfile.TemporaryDirectory() as folder, state_in(folder):
