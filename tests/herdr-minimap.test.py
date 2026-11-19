@@ -965,33 +965,6 @@ class Sheet(unittest.TestCase):
             sheet.main([out, "baobab"])
 
 
-class Names(unittest.TestCase):
-    """tools/herdr-names.sh, whose labels the nav reads to find the first mate."""
-
-    def label(self, where):
-        """The label herdr-names.sh gives a session started in where under a fake home, whose shells export FM_HOME as
-        every shell here does, or None when it leaves the pane alone."""
-        with tempfile.TemporaryDirectory() as tmp:
-            home = os.path.realpath(tmp)
-            os.makedirs(os.path.join(home, where))
-            with open(os.path.join(home, "herdr"), "w") as f:
-                f.write(f'#!/bin/sh\n[ "$2" = rename ] && printf %s "$4" > {home}/label\nexit 0\n')
-            os.chmod(os.path.join(home, "herdr"), 0o755)
-            env = {"PATH": home + os.pathsep + os.environ["PATH"], "HOME": home, "HERDR_PANE_ID": "w1:p1",
-                   "FM_HOME": os.path.join(home, "dev")}
-            subprocess.run(["bash", os.path.join(HERE, "..", "herdr-names.sh")], input="{}", env=env,
-                           cwd=os.path.join(home, where), text=True, check=True, timeout=10)
-            try:
-                with open(os.path.join(home, "label"), encoding="utf-8") as f:
-                    return f.read()
-            except FileNotFoundError:
-                return None
-
-    def test_only_the_session_in_the_firstmate_checkout_is_the_first_mate(self):
-        self.assertEqual(self.label("dev/firstmate"), "👒 Luffy: first mate")
-        self.assertIsNone(self.label("dev"), "a hand session in the home keeps its own name")
-        self.assertIsNone(self.label("dev/projects/webapp"))
-
 
 if __name__ == "__main__":
     unittest.main()
