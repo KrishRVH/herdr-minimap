@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""tools/herdr-minimap: the nav's fan, the states it shows, which agents count as at work, and the bonsai pane: its
+"""herdr-minimap: the nav's fan, the states it shows, which agents count as at work, and the bonsai pane: its
 stages and varieties, the garden that keeps each variety's growth, the controls and the contact sheet."""
 import contextlib
 import fcntl
@@ -18,7 +18,7 @@ import unittest
 import zlib
 
 HERE = os.path.dirname(os.path.realpath(__file__))
-sys.path.insert(0, os.path.join(HERE, "..", "herdr-minimap"))
+sys.path.insert(0, os.path.join(HERE, ".."))
 # No case may reach the live herdr: its socket and CLI point nowhere, so a call a case forgot to fake gets nothing.
 for key in [k for k in os.environ if k.startswith("HERDR_")]:
     os.environ.pop(key, None)
@@ -30,7 +30,7 @@ import art  # noqa: E402
 import bonsai  # noqa: E402
 import sheet  # noqa: E402
 
-spec = importlib.util.spec_from_file_location("minimap", os.path.join(HERE, "..", "herdr-minimap", "minimap.py"))
+spec = importlib.util.spec_from_file_location("minimap", os.path.join(HERE, "..", "minimap.py"))
 mm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mm)
 mm.COLOR = False
@@ -737,7 +737,7 @@ class Garden(unittest.TestCase):
             bonsai.accrue(160)
             code = "import json, bonsai; print(json.dumps(bonsai.garden()))"
             fresh = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30,
-                                   cwd=os.path.join(HERE, "..", "herdr-minimap"), env=dict(os.environ))
+                                   cwd=os.path.join(HERE, ".."), env=dict(os.environ))
             self.assertEqual(json.loads(fresh.stdout), {"variety": "black pine", "counted": 160,
                                                         "grown": {"sakura": 100, "maple": 0, "black pine": 60}})
 
