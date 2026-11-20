@@ -1,16 +1,11 @@
 #!/usr/bin/python3
 """Fleet charts, navigation, and pane integration."""
-import fcntl
 import importlib.util
 import json
 import os
-import pty
-import select
-import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import time
 import unittest
 
@@ -292,40 +287,21 @@ class Nav(unittest.TestCase):
         self.assertEqual(mm.screen(["nav"] * 9, 4, "hint"), ["nav"] * 3 + ["hint"])
 
 
-class BonsaiIntegration(unittest.TestCase):
-    def test_tree_entrypoint_runs_the_bundle_and_keeps_the_plugins_view(self):
-        def wait_for(needle):
-            output = bytearray()
-            deadline = time.monotonic() + 10
-            while needle not in output:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
-                    self.fail(f"Missing {needle!r} in pane output")
-                output.extend(os.read(master, 16384))
-
+class BonsaiPane(unittest.TestCase):
+    def test_the_tree_pane_runs_pixel_bonsai_from_path(self):
         with tempfile.TemporaryDirectory() as home:
-            env = {"HOME": home, "XDG_STATE_HOME": home, "HERDR_PLUGIN_STATE_DIR": home}
-            view_file = os.path.join(home, "bonsai-view")
-            with open(view_file, "w") as f:
-                f.write("lifetime\n")
-            master, slave = pty.openpty()
-            try:
-                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 64, 0, 0))
-                with subprocess.Popen([sys.executable, mm.__file__, "--tree"], cwd=home, env=env,
-                                      stdin=slave, stdout=slave, stderr=slave) as proc:
-                    try:
-                        wait_for(b"lifetime")
-                        os.write(master, b" ")
-                        wait_for(b"today")
-                        with open(view_file) as f:
-                            self.assertEqual(f.read().strip(), "today")
-                    finally:
-                        proc.terminate()
-                        proc.wait(timeout=10)
-                self.assertEqual(proc.returncode, 0)
-            finally:
-                os.close(master)
-                os.close(slave)
+            with open(os.path.join(home, "pixel-bonsai"), "w") as f:
+                f.write("#!/bin/sh\necho grown \"$@\"\n")
+            os.chmod(os.path.join(home, "pixel-bonsai"), 0o755)
+            out = subprocess.run([sys.executable, mm.__file__, "--tree"], env={"HOME": home, "PATH": home},
+                                 capture_output=True, text=True, timeout=10)
+            self.assertEqual(out.stdout, "grown\n")
+
+    def test_without_pixel_bonsai_the_pane_says_how_to_get_it(self):
+        with tempfile.TemporaryDirectory() as home:
+            out = subprocess.run([sys.executable, mm.__file__, "--tree"], env={"HOME": home, "PATH": home},
+                                 input="\n", capture_output=True, text=True, timeout=10)
+            self.assertIn("go install github.com/KrishRVH/pixel-bonsai@latest", out.stdout)
 
 
 if __name__ == "__main__":

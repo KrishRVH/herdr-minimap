@@ -15,15 +15,11 @@ In the nav: up/down or the wheel picks, enter or a click goes, 1-9 jumps to that
 the first mate, esc or q steps back. Like herdr's sidebar it stays in view: it moves into whichever tab has focus,
 crew spaces included (only while the captain looks at one, and firstmate's teardown never closes the tab in view),
 and pops up instead over a zoomed tab. Under the nav, in a pane of its own that moves with the column and keeps the
-height the captain gives it, a pixel bonsai grows with the captain's agent tokens through twenty named stages, drawn
-by pixel-bonsai as large as its pane holds: a sakura, a maple or a Japanese black pine, each
-keeping its own day and lifetime growth. The day's tree sprouts at midnight and grows with the tokens
-counted while that variety is selected; the lifetime tree is the same variety at the age its own tokens have grown it
-to. A click on the variety in the caption, v, tab or the arrows switch
-variety; any other click or key switches between today and lifetime; the pane keeps the variety and view last shown.
-It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and Claude's transcripts
-(~/.claude*/projects); it changes only focus, its own panes, the deck's space and its own state (the bonsai's token
-store and garden, the view last shown, the pane to step back to).
+height the captain gives it, the pixel-bonsai command (https://github.com/KrishRVH/pixel-bonsai, on PATH) grows a
+pixel bonsai with the captain's agent tokens, as large as its pane holds; its keys, garden and usage sources are its
+own. It reads herdr's live snapshot, firstmate's state/<id>.meta and .status, and Claude's subagent transcripts
+(~/.claude*/projects); it changes only focus, its own panes, the deck's space and its own state (the pane to step
+back to).
 Python 3.9, standard library.
 """
 import fcntl
@@ -32,6 +28,7 @@ import json
 import os
 import re
 import select
+import shutil
 import signal
 import socket
 import subprocess
@@ -912,6 +909,19 @@ def ensure(startup):
             open_nav(snap, layout)
 
 
+def bonsai_pane():
+    """Run pixel-bonsai in the tree pane: from PATH, else where go build or go install puts it. Without it the pane
+    says how to get it and waits for a key, so it does not vanish unexplained."""
+    found = shutil.which("pixel-bonsai") or next(
+        (p for p in (os.path.expanduser("~/.local/bin/pixel-bonsai"), os.path.expanduser("~/go/bin/pixel-bonsai"))
+         if os.access(p, os.X_OK)), None)
+    if found:
+        os.execv(found, [found])
+    print("The bonsai needs pixel-bonsai on PATH: https://github.com/KrishRVH/pixel-bonsai\n"
+          "go install github.com/KrishRVH/pixel-bonsai@latest, or a release archive.")
+    sys.stdin.readline()
+
+
 def main(argv):
     global COLOR
     if "--toggle" in argv:
@@ -921,10 +931,7 @@ def main(argv):
     if "--ensure" in argv:
         return ensure(startup=os.environ.get("HERDR_PLUGIN_EVENT", "startup") == "startup")
     if "--tree" in argv:
-        bundle = os.path.join(os.path.dirname(os.path.realpath(__file__)), "vendor", "pixel-bonsai.pyz")
-        view_file = os.path.join(os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.expanduser("~/.local/state/qd"),
-                                 "bonsai-view")
-        os.execv(sys.executable, [sys.executable, bundle, "--view-file", view_file])
+        return bonsai_pane()
     if "--line" in argv:
         COLOR = False
         print(line_text(fleet()))

@@ -7,8 +7,7 @@ your coding agents’ token usage. To run the tree on its own or customize a var
 [Pixel Bonsai](https://github.com/KrishRVH/pixel-bonsai).
 
 It reads herdr's live snapshot, firstmate's `state/<id>.meta` and `.status` under `$FM_HOME` (default `~/dev`),
-and Claude Code subagent transcripts. Pixel Bonsai counts usage across supported harnesses and custom usage events.
-The plugin manages its panes and focus, and the tree stores its garden under `$XDG_STATE_HOME/qd`.
+and Claude Code subagent transcripts, and manages only its own panes, focus and plugin state.
 
 ## Install
 
@@ -24,16 +23,10 @@ Python 3.9 or later, standard library only.
 
 ## Bonsai pane
 
-The plugin ships the standalone tree as a Python zipapp, so a plain clone includes the tree.
-Both the plugin and the standalone command use the same token history and garden. The plugin keeps its
-day or lifetime view preference in the usual Herdr plugin state directory.
-
-The archive contains the Python sources from [pixel-bonsai at c1dd3bd](https://github.com/KrishRVH/pixel-bonsai/tree/c1dd3bde28ada18339839dfd7f924885e10f8778).
-To rebuild it from a sibling checkout at the desired commit, run this from the minimap directory:
-
-```sh
-git -C ../pixel-bonsai archive --format=zip HEAD -- LICENSE ':(top,glob)*.py' > vendor/pixel-bonsai.pyz
-```
+The pane under the nav column runs the `pixel-bonsai` command, so install
+[Pixel Bonsai](https://github.com/KrishRVH/pixel-bonsai) and put it on `PATH` (`~/.local/bin` and `~/go/bin`
+are found too). Its keys, garden and usage sources are its own, and the pane shares the garden with any other
+`pixel-bonsai` you run. Without it the pane says how to get it.
 
 ## Tests
 

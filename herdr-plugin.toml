@@ -4,7 +4,7 @@
 # puts the one-line version in the tab bar.
 id = "qd.minimap"
 name = "Fleet minimap"
-version = "0.4.0"
+version = "0.5.0"
 min_herdr_version = "0.9.5"
 description = "The nav column: spaces, agents and the first mate's crew fanned out like a chart, with a bonsai under it"
 platforms = ["macos", "linux"]
@@ -31,8 +31,8 @@ title = "⛵ nav"
 placement = "split"
 command = ["/usr/bin/env", "python3", "minimap.py"]
 
-# the bonsai under the nav column, which moves with it and keeps the height the captain gives it; a click or key
-# switches it between the day's tree and the lifetime tree, and v, tab or the arrows between its varieties
+# the bonsai under the nav column, which moves with it and keeps the height the captain gives it: the pixel-bonsai
+# command, on PATH (https://github.com/KrishRVH/pixel-bonsai)
 [[panes]]
 id = "tree"
 title = "🌳 bonsai"
